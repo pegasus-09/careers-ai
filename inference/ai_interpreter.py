@@ -1,12 +1,15 @@
 import json
 from openai import OpenAI
+from pathlib import Path
 
 client = OpenAI(api_key="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")
+BASE_DIR = Path(__file__).resolve().parents[1]
+PROMPT_PATH = BASE_DIR / "questionnaires" / "prompt.txt"
 
 def build_profile_prompt(profile_dict):
     json_string = json.dumps(profile_dict)
 
-    with open('../questionnaires/prompt.txt', 'r') as f:
+    with open(PROMPT_PATH, "r", encoding="utf-8") as f:
         prompt = f"{f.read()}{json_string}"
 
     return prompt

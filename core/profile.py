@@ -1,4 +1,4 @@
-from career_components import Traits, Interests, Aptitudes, Values, WorkStyles
+from core.career_components import Traits, Interests, Aptitudes, Values, WorkStyles
 
 
 class PsychometricProfile:
