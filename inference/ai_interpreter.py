@@ -6,7 +6,7 @@ client = OpenAI(api_key="sk-proj-w1XY1ece2-Z5OgAJ97n0abhugl6ptvLt-5_Jegm1xBIihzi
 def build_profile_prompt(profile_dict):
     json_string = json.dumps(profile_dict)
 
-    with open('prompt.txt', 'r') as f:
+    with open('../questionnaires/prompt.txt', 'r') as f:
         prompt = f"{f.read()}{json_string}"
 
     return prompt

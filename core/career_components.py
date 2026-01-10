@@ -1,4 +1,4 @@
-import utils
+from ingestion import utils
 
 
 # Traits are characteristics that the user possesses
@@ -12,8 +12,14 @@ class Traits:
         "adaptability"
     ]
 
-    def __init__(self):
+    def __init__(self, scores=None):
         self.scores = {trait: 0.0 for trait in self.TRAIT_TYPES}
+
+        if scores:
+            for trait, value in scores.items():
+                if trait not in self.scores:
+                    raise ValueError(f"Invalid trait: {trait}")
+                self.scores[trait] = utils.clamp(value)
 
     def set(self, trait, value):
         if trait not in self.scores:
@@ -42,8 +48,14 @@ class Interests:
         "hands_on"
     ]
 
-    def __init__(self):
+    def __init__(self, scores=None):
         self.scores = {interest: 0.0 for interest in self.INTEREST_TYPES}
+
+        if scores:
+            for interest, value in scores.items():
+                if interest not in self.scores:
+                    raise ValueError(f"Invalid interest: {interest}")
+                self.scores[interest] = utils.clamp(value)
 
     def set(self, interest, value):
         if interest not in self.scores:
@@ -62,8 +74,14 @@ class Aptitudes:
         "memory"
     ]
 
-    def __init__(self):
+    def __init__(self, scores=None):
         self.scores = {aptitude: 0.0 for aptitude in self.APTITUDE_TYPES}
+
+        if scores:
+            for aptitude, value in scores.items():
+                if aptitude not in self.scores:
+                    raise ValueError(f"Invalid aptitude: {aptitude}")
+                self.scores[aptitude] = utils.clamp(value)
 
     def set(self, aptitude, value):
         if aptitude not in self.scores:
@@ -83,8 +101,14 @@ class Values:
         "work_life_balance"
     ]
 
-    def __init__(self):
-        self.scores = {value: 0.0 for value in self.VALUE_TYPES}
+    def __init__(self, scores=None):
+        self.scores = {val: 0.0 for val in self.VALUE_TYPES}
+
+        if scores:
+            for val, value in scores.items():
+                if val not in self.scores:
+                    raise ValueError(f"Invalid value: {val}")
+                self.scores[val] = utils.clamp(value)
 
     def set(self, type_value, value):
         if type_value not in self.scores:
@@ -102,8 +126,14 @@ class WorkStyles:
         "ambiguity_tolerance"
     ]
 
-    def __init__(self):
-        self.scores = {value: 0.0 for value in self.WORK_STYLE_TYPES}
+    def __init__(self, scores=None):
+        self.scores = {work_style: 0.0 for work_style in self.WORK_STYLE_TYPES}
+
+        if scores:
+            for work_style, value in scores.items():
+                if work_style not in self.scores:
+                    raise ValueError(f"Invalid work_style: {work_style}")
+                self.scores[work_style] = utils.clamp(value)
 
     def set(self, work_style, value):
         if work_style not in self.scores:

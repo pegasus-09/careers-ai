@@ -1,4 +1,4 @@
-from questions import Question
+from questionnaires.questions import Question
 
 LIKERT_5_MAP = {
     1: 0.0,
