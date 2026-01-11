@@ -116,7 +116,28 @@ WORK_STYLE_MAP = {
 WORK_ACTIVITY_MAP = {
     "Analyzing Data or Information": ("analytical", 1.0),
     "Thinking Creatively": ("creative", 1.0),
-    "Interacting With Computers": ("technical_interaction", 1.0),
-    "Communicating with Supervisors, Peers, or Subordinates": ("communication", 1.0),
+    "Interacting With Computers": ("analytical", 0.8),
+    "Communicating with Supervisors, Peers, or Subordinates": ("social", 1.0),
     "Guiding, Directing, and Motivating Subordinates": ("leadership", 1.0),
 }
+
+
+# ======================================================
+# WORK VALUES → VALUES
+# Source: Work Values.txt
+# Scales: EX (Extent), VH (High-Point)
+# ======================================================
+
+WORK_VALUE_MAP = {
+    "Achievement": ("prestige", 1.0),
+    "Recognition": ("prestige", 0.8),
+
+    "Independence": ("autonomy", 1.0),
+
+    "Relationships": ("helping_others", 1.0),
+
+    "Support": ("stability", 0.8),
+
+    "Working Conditions": ("work_life_balance", 1.0),
+}
+

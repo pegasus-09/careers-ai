@@ -1,9 +1,10 @@
 import csv
 from collections import defaultdict
 from pathlib import Path
+from typing import Literal
 
-from core.career_components import Traits, Aptitudes, Interests
-from data.onet.mappings import ABILITY_MAP, INTEREST_MAP, WORK_STYLE_MAP
+from core.career_components import Traits, Aptitudes, Interests, Values
+from data.onet.mappings import ABILITY_MAP, INTEREST_MAP, WORK_STYLE_MAP, WORK_ACTIVITY_MAP, WORK_VALUE_MAP
 
 
 # Resolve paths safely
@@ -16,9 +17,45 @@ INTERESTS_FILE = CSV_DIR / "interests.csv"
 WORK_STYLES_FILE = CSV_DIR / "work_styles.csv"
 WORK_ACTIVITIES_FILE = CSV_DIR / "work_activities.csv"
 OCCUPATION_FILE = CSV_DIR / "occupation_data.csv"
+WORK_VALUES_FILE = CSV_DIR / "work_values.csv"
+
+# For Values
+VH_VALUE_MAP = {
+    1: "Achievement",
+    2: "Working Conditions",
+    3: "Recognition",
+    4: "Relationships",
+    5: "Support",
+    6: "Independence",
+}
+
+'''
+SCALE RANGES: (O*NET 30.x)
+
+LV: 0–7
+IM: 1–5
+IH: 0–6
+OI: 1–7
+WI: -3–3
+DR: 0–10
+VH: 1–6
+EX: 1–7
+'''
+def normalise(value: float, scale: Literal["LV", "IM", "IH", "OI", "WI", "DR", "VH", "EX"]) -> float:
+    if type(value) != float: value = float(value)
+
+    if scale == "LV": return value / 7
+    elif scale == "IM": return (value - 1) / 4
+    elif scale == "IH": return value / 6
+    elif scale == "OI": return (value - 1) / 6
+    elif scale == "WI": return value / 3
+    elif scale == "DR": return value / 10
+    elif scale == "VH": return (value - 1) / 5
+    elif scale == "EX": return (value - 1) / 6
+    else: raise ValueError(f"Unknown scale: {scale}")
 
 
-def load_abilities():
+def build_aptitudes_from_abilities():
     """
     Loads O*NET Abilities.txt and maps them to internal aptitude dimensions.
     Returns: dict[SOC_code -> dict[aptitude_name -> list[values]]]
@@ -29,46 +66,34 @@ def load_abilities():
         reader = csv.DictReader(f)
 
         for row in reader:
-            soc_code = row["O*NET-SOC Code"]
+            abilities_soc = row["O*NET-SOC Code"]
             element_name = row["Element Name"]
             scale_id = row["Scale ID"]
-
-            if scale_id not in ("LV", "IM"):
-                continue
-
+            raw_val = row["Data Value"]
 
             if element_name not in ABILITY_MAP:
                 continue
 
             try:
-                value = float(row["Data Value"]) / 7.0
+                value = normalise(raw_val, scale_id)
             except ValueError:
                 continue
 
             internal_name, weight = ABILITY_MAP[element_name]
-            data[soc_code][internal_name][scale_id].append(value * weight)
+            data[abilities_soc][internal_name][scale_id].append(value * weight)
 
-    return data
-
-
-def build_aptitudes():
-    """
-    Aggregates mapped abilities into Aptitudes objects per career.
-    Returns: dict[SOC_code -> Aptitudes]
-    """
-    raw = load_abilities()
     aptitudes_by_career = {}
 
-    for soc_code, values in raw.items():
+    for abilities_soc, vals in data.items():
         aggregated = {}
 
-        for name, scales in values.items():
+        for name, scales in vals.items():
             lv = sum(scales["LV"]) / len(scales["LV"]) if scales["LV"] else 0.0
             im = sum(scales["IM"]) / len(scales["IM"]) if scales["IM"] else 0.0
 
             aggregated[name] = lv * 0.6 + im * 0.4
 
-        aptitudes_by_career[soc_code] = Aptitudes(aggregated)
+        aptitudes_by_career[abilities_soc] = Aptitudes(aggregated)
 
     return aptitudes_by_career
 
@@ -83,7 +108,8 @@ def build_interests():
             interest_soc = row["O*NET-SOC Code"]
             name = row["Element Name"]
             scale_id = row["Scale ID"]
-            
+            raw_val = row["Data Value"]
+
             if name not in INTEREST_MAP:
                 continue
 
@@ -91,7 +117,7 @@ def build_interests():
                 continue
 
             try:
-                value = float(row["Data Value"]) / 7.0
+                value = normalise(raw_val, scale_id)
             except ValueError:
                 continue
 
@@ -100,10 +126,10 @@ def build_interests():
 
     interests_by_career = {}
 
-    for career_soc, values in data.items():
+    for career_soc, vals in data.items():
         aggregated = {
             dimension: sum(scores) / len(scores)
-            for dimension, scores in values.items()
+            for dimension, scores in vals.items()
             if scores
         }
         interests_by_career[career_soc] = Interests(aggregated)
@@ -118,30 +144,32 @@ def build_traits_from_work_styles():
         reader = csv.DictReader(f)
 
         for row in reader:
+            work_style__soc = row["O*NET-SOC Code"]
+            name = row["Element Name"]
             scale_id = row["Scale ID"]
+            raw_val = row["Data Value"]
+
             if scale_id != "WI":
                 continue
 
-            element_name = row["Element Name"]
-            if element_name not in WORK_STYLE_MAP:
+
+            if name not in WORK_STYLE_MAP:
                 continue
 
             try:
-                value = float(row["Data Value"]) / 3.0
-                if value < 0: print(f"NEG VALUE {value} for {element_name}")
+                value = normalise(raw_val, scale_id)
             except ValueError:
                 continue
 
-            career_soc = row["O*NET-SOC Code"]
-            trait_name, weight = WORK_STYLE_MAP[element_name]
-            data[career_soc][trait_name].append(value * weight)
+            trait_name, weight = WORK_STYLE_MAP[name]
+            data[work_style__soc][trait_name].append(value * weight)
 
     traits_by_career = {}
 
-    for career_soc, values in data.items():
+    for career_soc, vals in data.items():
         aggregated = {
             trait: sum(scores) / len(scores)
-            for trait, scores in values.items()
+            for trait, scores in vals.items()
             if scores
         }
         traits_by_career[career_soc] = Traits(aggregated)
@@ -149,32 +177,167 @@ def build_traits_from_work_styles():
     return traits_by_career
 
 
-if __name__ == "__main__":
-    aptitudes = build_aptitudes()
+def build_traits_from_work_activities():
+    data = defaultdict(lambda: defaultdict(lambda: {"LV": [], "IM": []}))
 
-    print("=====APTITUDES=====")
-    for soc in ["15-1252.00", "11-1011.00"]:  # software dev, executive
+    with open(WORK_ACTIVITIES_FILE, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            work_activity__soc = row["O*NET-SOC Code"]
+            name = row["Element Name"]
+            scale_id = row["Scale ID"]
+            raw_val = row["Data Value"]
+
+            if name not in WORK_ACTIVITY_MAP:
+                continue
+
+            try:
+                value = normalise(raw_val, scale_id)
+            except ValueError:
+                continue
+
+            trait_name, weight = WORK_ACTIVITY_MAP[name]
+            data[work_activity__soc][trait_name][scale_id].append(value * weight)
+
+    traits_by_career = {}
+
+    for career_soc, vals in data.items():
+        aggregated = {}
+
+        for trait, scales in vals.items():
+            lv = sum(scales["LV"]) / len(scales["LV"]) if scales["LV"] else 0.0
+            im = sum(scales["IM"]) / len(scales["IM"]) if scales["IM"] else 0.0
+
+            # Importance slightly outweighs frequency
+            aggregated[trait] = lv * 0.4 + im * 0.6
+
+        traits_by_career[career_soc] = Traits(aggregated)
+
+    return traits_by_career
+
+
+def build_values_from_work_values():
+    """
+    Builds the Values component from O*NET Work Values data.
+
+    Rules:
+    - EX provides magnitude for each value.
+    - VH indicates which values are top-3 for the occupation.
+    - If VH exists for a SOC, only top-3 values are kept.
+    - If VH is missing for a SOC, fall back to EX-only.
+    """
+
+    from collections import defaultdict
+
+    # SOC -> value_name -> EX score (weighted)
+    ex_scores_by_soc = defaultdict(dict)
+
+    # SOC -> set of value_names that are top-3 (VH)
+    vh_hits_by_soc = defaultdict(set)
+
+    with open(WORK_VALUES_FILE, encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            soc_code = row["O*NET-SOC Code"]
+            scale_id = row["Scale ID"]
+            element_name = row["Element Name"]
+            raw_value = row["Data Value"]
+
+            # --- EX: magnitude ---
+            if scale_id == "EX":
+                if element_name not in WORK_VALUE_MAP:
+                    continue
+
+                try:
+                    ex_value = normalise(raw_value, "EX")
+                except ValueError:
+                    continue
+
+                value_name, weight = WORK_VALUE_MAP[element_name]
+                ex_scores_by_soc[soc_code][value_name] = ex_value * weight
+
+            # --- VH: top-3 selector ---
+            elif scale_id == "VH":
+                try:
+                    vh_code = int(float(raw_value))
+                except ValueError:
+                    continue
+
+                if vh_code == 0 or vh_code not in VH_VALUE_MAP:
+                    continue
+
+                value_element = VH_VALUE_MAP[vh_code]
+                if value_element not in WORK_VALUE_MAP:
+                    continue
+
+                value_name, _ = WORK_VALUE_MAP[value_element]
+                vh_hits_by_soc[soc_code].add(value_name)
+
+    # --- Combine EX and VH ---
+    values_by_career = {}
+
+    for soc_code, ex_values in ex_scores_by_soc.items():
+        aggregated = {}
+
+        has_vh = bool(vh_hits_by_soc.get(soc_code))
+
+        for value_name, ex_score in ex_values.items():
+            if has_vh:
+                aggregated[value_name] = (
+                    ex_score if value_name in vh_hits_by_soc[soc_code] else 0.0
+                )
+            else:
+                aggregated[value_name] = ex_score
+
+        values_by_career[soc_code] = Values(aggregated)
+
+    return values_by_career
+
+
+if __name__ == "__main__":
+    aptitudes = build_aptitudes_from_abilities()
+
+    print("\n\n=====APTITUDES=====")
+    for soc in ["15-1251.00", "11-1011.00"]:  # computer programmer, executive
         print("\nSOC:", soc)
         for k, v in aptitudes[soc].scores.items():
             print(f"  {k}: {v:.2f}")
 
-    print("=====INTERESTS=====")
+    print("\n\n=====INTERESTS=====")
 
     interests = build_interests()
 
-    for soc in ["15-1252.00", "11-1011.00"]:
+    for soc in ["15-1251.00", "11-1011.00"]:
         print("\nSOC:", soc)
-        print("Interests:")
         for k, v in interests[soc].scores.items():
             print(f"  {k}: {v:.2f}")
 
-    print("=====TRAITS (FROM WS)=====")
+    print("\n\n=====TRAITS (FROM WS)=====")
 
-    traits = build_traits_from_work_styles()
+    ws_traits = build_traits_from_work_styles()
 
-    for soc in ["15-1252.00", "11-1011.00"]:
+    for soc in ["15-1251.00", "11-1011.00"]:
         print("\nSOC:", soc)
-        print("Traits:")
-        for k, v in traits[soc].scores.items():
+        for k, v in ws_traits[soc].scores.items():
+            print(f"  {k}: {v:.2f}")
+
+    print("\n\n=====TRAITS (FROM WA)=====")
+
+    wa_traits = build_traits_from_work_activities()
+
+    for soc in ["15-1251.00", "11-1011.00"]:
+        print("\nSOC:", soc)
+        for k, v in wa_traits[soc].scores.items():
+            print(f"  {k}: {v:.2f}")
+
+    print("\n\n=====VALUES=====")
+
+    values = build_values_from_work_values()
+
+    for soc in ["15-1251.00", "11-1011.00"]:
+        print("\nSOC:", soc)
+        for k, v in values[soc].scores.items():
             print(f"  {k}: {v:.2f}")
 

@@ -25,8 +25,4 @@ def convert(tsv_name, csv_name):
 
 
 if __name__ == "__main__":
-    convert("Abilities.txt", "abilities.csv")
-    convert("Interests.txt", "interests.csv")
-    convert("Work Styles.txt", "work_styles.csv")
-    convert("Work Activities.txt", "work_activities.csv")
-    convert("Occupation Data.txt", "occupation_data.csv")
+    convert("Work Values.txt", "work_values.csv")
