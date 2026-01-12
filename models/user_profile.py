@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from core.profile import PsychometricProfile
+from models.profile import PsychometricProfile
 
 
 @dataclass

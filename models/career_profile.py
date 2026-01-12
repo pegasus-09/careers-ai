@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from core.career_components import (
+from models.career_components import (
     Aptitudes,
     Interests,
     Traits,

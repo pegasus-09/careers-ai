@@ -1,4 +1,4 @@
-from core.career_components import Aptitudes
+from models.career_components import Aptitudes
 
 
 def match_aptitudes(

@@ -1,4 +1,4 @@
-from core.career_components import Interests
+from models.career_components import Interests
 
 
 def match_interests(

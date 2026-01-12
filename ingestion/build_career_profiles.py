@@ -3,9 +3,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Literal
 
-from core.career_components import Traits, Aptitudes, Interests, Values, WorkStyles
+from models.career_components import Traits, Aptitudes, Interests, Values, WorkStyles
 from data.onet.mappings import ABILITY_MAP, INTEREST_MAP, WORK_STYLE_MAP, WORK_ACTIVITY_MAP, WORK_VALUE_MAP
-from core.career_profile import CareerProfile
+from models.career_profile import CareerProfile
 
 
 # Resolve paths safely

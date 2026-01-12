@@ -1,4 +1,4 @@
-from core.career_components import WorkStyles
+from models.career_components import WorkStyles
 
 def match_work_styles(
     user_ws: WorkStyles,

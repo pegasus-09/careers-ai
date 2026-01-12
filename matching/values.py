@@ -1,4 +1,4 @@
-from core.career_components import Values
+from models.career_components import Values
 
 
 def match_values(

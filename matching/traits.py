@@ -1,4 +1,4 @@
-from core.career_components import Traits
+from models.career_components import Traits
 
 
 def match_traits(

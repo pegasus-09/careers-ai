@@ -1,5 +1,5 @@
-from core.user_profile import UserProfile
-from core.career_profile import CareerProfile
+from models.user_profile import UserProfile
+from models.career_profile import CareerProfile
 from matching.aptitudes import match_aptitudes
 from matching.intersts import match_interests
 from matching.traits import match_traits

@@ -1,4 +1,4 @@
-from core.user_profile import UserProfile
+from models.user_profile import UserProfile
 from matching.engine import match_user_to_role
 from ingestion.build_career_profiles import build_all_career_profiles
 from scripts.sample import build_test_profile

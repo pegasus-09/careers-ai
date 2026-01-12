@@ -1,9 +1,9 @@
 from typing import Dict, List
 from statistics import mean
 
-from core.profile import PsychometricProfile
+from models.profile import PsychometricProfile
 from ingestion.utils import clamp
-from core.career_components import Traits, Interests, Aptitudes, Values, WorkStyles
+from models.career_components import Traits, Interests, Aptitudes, Values, WorkStyles
 from rank_all_careers import rank_profiles
 from ingestion.read_occupation_data import load_soc_title_mapping
 

@@ -1,5 +1,5 @@
-from core.profile import PsychometricProfile
-from core.career_components import Traits, Interests, Aptitudes, Values, WorkStyles
+from models.profile import PsychometricProfile
+from models.career_components import Traits, Interests, Aptitudes, Values, WorkStyles
 from inference.ai_interpreter import interpret_profile
 
 
