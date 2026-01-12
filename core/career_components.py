@@ -126,17 +126,17 @@ class WorkStyles:
         "ambiguity_tolerance"
     ]
 
-    def __init__(self, scores=None):
+    def __init__(self, scores=None, clamp=True):
         self.scores = {work_style: 0.0 for work_style in self.WORK_STYLE_TYPES}
 
         if scores:
             for work_style, value in scores.items():
                 if work_style not in self.scores:
                     raise ValueError(f"Invalid work_style: {work_style}")
-                self.scores[work_style] = utils.clamp(value)
+                self.scores[work_style] = utils.clamp(value) if clamp else value
 
-    def set(self, work_style, value):
+    def set(self, work_style, value, clamp=True):
         if work_style not in self.scores:
             raise ValueError(f"Invalid value: {value}")
 
-        self.scores[work_style] = utils.clamp(value)
+        self.scores[work_style] = utils.clamp(value) if clamp else value

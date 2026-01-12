@@ -46,7 +46,7 @@ def build_test_profile():
         "ambiguity_tolerance": 0.35
     })
 
-    profile = PsychometricProfile(
+    prof = PsychometricProfile(
         traits=traits,
         interests=interests,
         aptitudes=aptitudes,
@@ -54,8 +54,8 @@ def build_test_profile():
         work_styles=work_styles
     )
 
-    profile.confidence = 0.65
-    return profile
+    prof.confidence = 0.65
+    return prof
 
 
 if __name__ == "__main__":

@@ -5,12 +5,14 @@ from typing import Literal
 
 from core.career_components import Traits, Aptitudes, Interests, Values, WorkStyles
 from data.onet.mappings import ABILITY_MAP, INTEREST_MAP, WORK_STYLE_MAP, WORK_ACTIVITY_MAP, WORK_VALUE_MAP
+from core.career_profile import CareerProfile
 
 
 # Resolve paths safely
 BASE_DIR = Path(__file__).resolve().parents[1]
 ONET_RAW_DIR = BASE_DIR / "data" / "onet" / "raw"
 CSV_DIR = BASE_DIR / "data" / "onet" / "csv"
+PROCESSED_DIR = BASE_DIR / "data" / "onet" / "processed"
 
 ABILITIES_FILE = CSV_DIR / "abilities.csv"
 INTERESTS_FILE = CSV_DIR / "interests.csv"
@@ -18,6 +20,8 @@ WORK_STYLES_FILE = CSV_DIR / "work_styles.csv"
 WORK_ACTIVITIES_FILE = CSV_DIR / "work_activities.csv"
 OCCUPATION_FILE = CSV_DIR / "occupation_data.csv"
 WORK_VALUES_FILE = CSV_DIR / "work_values.csv"
+
+SOC_CODES = PROCESSED_DIR / "all_soc_codes.txt"
 
 # For Values
 VH_VALUE_MAP = {
@@ -55,6 +59,7 @@ def normalise(value: float, scale: Literal["LV", "IM", "IH", "OI", "WI", "DR", "
     else: raise ValueError(f"Unknown scale: {scale}")
 
 
+# noinspection DuplicatedCode
 def build_aptitudes_from_abilities() -> dict[str, Aptitudes]:
     """
     Loads O*NET Abilities.txt and maps them to internal aptitude dimensions.
@@ -87,11 +92,11 @@ def build_aptitudes_from_abilities() -> dict[str, Aptitudes]:
     for abilities_soc, vals in data.items():
         aggregated = {}
 
-        for name, scales in vals.items():
+        for result, scales in vals.items():
             lv = sum(scales["LV"]) / len(scales["LV"]) if scales["LV"] else 0.0
             im = sum(scales["IM"]) / len(scales["IM"]) if scales["IM"] else 0.0
 
-            aggregated[name] = lv * 0.6 + im * 0.4
+            aggregated[result] = lv * 0.6 + im * 0.4
 
         aptitudes_by_career[abilities_soc] = Aptitudes(aggregated)
 
@@ -106,11 +111,11 @@ def build_interests() -> dict[str, Interests]:
 
         for row in reader:
             interest_soc = row["O*NET-SOC Code"]
-            name = row["Element Name"]
+            element_name = row["Element Name"]
             scale_id = row["Scale ID"]
             raw_val = row["Data Value"]
 
-            if name not in INTEREST_MAP:
+            if element_name not in INTEREST_MAP:
                 continue
 
             if scale_id != "OI":
@@ -121,7 +126,7 @@ def build_interests() -> dict[str, Interests]:
             except ValueError:
                 continue
 
-            internal_name, weight = INTEREST_MAP[name]
+            internal_name, weight = INTEREST_MAP[element_name]
             data[interest_soc][internal_name].append(value * weight)
 
     interests_by_career = {}
@@ -145,7 +150,7 @@ def build_traits_from_work_styles() -> dict[str, Traits]:
 
         for row in reader:
             work_style__soc = row["O*NET-SOC Code"]
-            name = row["Element Name"]
+            element_name = row["Element Name"]
             scale_id = row["Scale ID"]
             raw_val = row["Data Value"]
 
@@ -153,7 +158,7 @@ def build_traits_from_work_styles() -> dict[str, Traits]:
                 continue
 
 
-            if name not in WORK_STYLE_MAP:
+            if element_name not in WORK_STYLE_MAP:
                 continue
 
             try:
@@ -161,7 +166,7 @@ def build_traits_from_work_styles() -> dict[str, Traits]:
             except ValueError:
                 continue
 
-            trait_name, weight = WORK_STYLE_MAP[name]
+            trait_name, weight = WORK_STYLE_MAP[element_name]
             data[work_style__soc][trait_name].append(value * weight)
 
     traits_by_career = {}
@@ -185,11 +190,11 @@ def build_traits_from_work_activities() -> dict[str, Traits]:
 
         for row in reader:
             work_activity__soc = row["O*NET-SOC Code"]
-            name = row["Element Name"]
+            element_name = row["Element Name"]
             scale_id = row["Scale ID"]
             raw_val = row["Data Value"]
 
-            if name not in WORK_ACTIVITY_MAP:
+            if element_name not in WORK_ACTIVITY_MAP:
                 continue
 
             try:
@@ -197,7 +202,7 @@ def build_traits_from_work_activities() -> dict[str, Traits]:
             except ValueError:
                 continue
 
-            trait_name, weight = WORK_ACTIVITY_MAP[name]
+            trait_name, weight = WORK_ACTIVITY_MAP[element_name]
             data[work_activity__soc][trait_name][scale_id].append(value * weight)
 
     traits_by_career = {}
@@ -304,34 +309,42 @@ def merge_traits(
     Merge Traits from Work Styles (WI-based) and Work Activities (LV+IM-based).
 
     Rules:
-    - Traits are additive across sources
-    - Missing traits default to 0
+    - Traits are averaged across contributing sources
+    - A trait present in only one source keeps its value
+    - Missing traits are simply absent (implicitly 0 later)
     - WI sign is preserved
     - No normalization or weighting at merge time
     """
 
-    from collections import defaultdict
-
-    merged_by_soc = {}
+    merged_by_soc: dict[str, Traits] = {}
 
     all_socs = set(ws_traits_by_soc) | set(wa_traits_by_soc)
 
     for soc_code in all_socs:
-        merged_scores = defaultdict(float)
+        trait_sums = defaultdict(float)
+        trait_counts = defaultdict(int)
 
-        work_style_traits = ws_traits_by_soc.get(soc_code)
-        if work_style_traits:
-            for trait_name, value in work_style_traits.scores.items():
-                merged_scores[trait_name] += value
+        ws_traits = ws_traits_by_soc.get(soc_code)
+        if ws_traits:
+            for trait_name, value in ws_traits.scores.items():
+                trait_sums[trait_name] += value
+                trait_counts[trait_name] += 1
 
-        work_activity_traits = wa_traits_by_soc.get(soc_code)
-        if work_activity_traits:
-            for trait_name, value in work_activity_traits.scores.items():
-                merged_scores[trait_name] += value
+        wa_traits = wa_traits_by_soc.get(soc_code)
+        if wa_traits:
+            for trait_name, value in wa_traits.scores.items():
+                trait_sums[trait_name] += value
+                trait_counts[trait_name] += 1
 
-        merged_by_soc[soc_code] = Traits(dict(merged_scores))
+        averaged_scores = {
+            trait: trait_sums[trait] / trait_counts[trait]
+            for trait in trait_sums
+        }
+
+        merged_by_soc[soc_code] = Traits(averaged_scores)
 
     return merged_by_soc
+
 
 
 def derive_work_styles(
@@ -359,8 +372,8 @@ def derive_work_styles(
 
         # Assigning WS
         team_based = social + leadership
-        structure = detail_oriented - adaptability
         pace = leadership + adaptability
+        structure = detail_oriented - adaptability
         ambiguity_tolerance = adaptability + creative - detail_oriented
 
         work_styles_by_soc[soc_code] = WorkStyles({
@@ -368,69 +381,52 @@ def derive_work_styles(
             "structure": structure,
             "pace": pace,
             "ambiguity_tolerance": ambiguity_tolerance,
-        })
+        }, False)
 
     return work_styles_by_soc
 
+
+def read_soc_codes():
+    with open(SOC_CODES, 'r') as f:
+        soc_codes = list(map(str.strip, f.readlines()))
+
+    return soc_codes
+
+def build_all_career_profiles():
+    soc_profiles = {}
+
+    apts = build_aptitudes_from_abilities()
+    ints = build_interests()
+    vals = build_values_from_work_values()
+    tr_ws = build_traits_from_work_styles()
+    tr_wa = build_traits_from_work_activities()
+    tr = merge_traits(tr_ws, tr_wa)
+    ws = derive_work_styles(tr)
+
+    for soc_code in read_soc_codes():
+        career_profile = CareerProfile(soc_code,
+                                       apts.get(soc_code, Aptitudes()),
+                                       ints.get(soc_code, Interests()),
+                                       tr.get(soc_code, Traits()),
+                                       vals.get(soc_code, Values()),
+                                       ws.get(soc_code, WorkStyles))
+        soc_profiles[soc_code] = career_profile
+
+    return soc_profiles
+
+def read_career_profile(profile: CareerProfile):
+    print("SOC: ", profile)
+    for comp in ['aptitudes', 'interests', 'traits', 'values', 'work_styles']:
+        print(f"======={comp.upper()}=======")
+        component = getattr(profile, comp)
+        for k, v in component.scores.items():
+            print(f"  {k}: {v:.2f}")
+        print()
+
+
 if __name__ == "__main__":
-    aptitudes = build_aptitudes_from_abilities()
+    # socs = input("Enter SOCs: ").split()
 
-    print("\n\n=====APTITUDES=====")
-    for soc in ["15-1251.00", "11-1011.00"]:  # computer programmer, executive
-        print("\nSOC:", soc)
-        for k, v in aptitudes[soc].scores.items():
-            print(f"  {k}: {v:.2f}")
+    profiles = build_all_career_profiles()
 
-    print("\n\n=====INTERESTS=====")
-
-    interests = build_interests()
-
-    for soc in ["15-1251.00", "11-1011.00"]:
-        print("\nSOC:", soc)
-        for k, v in interests[soc].scores.items():
-            print(f"  {k}: {v:.2f}")
-
-    print("\n\n=====TRAITS (FROM WS)=====")
-
-    ws_traits = build_traits_from_work_styles()
-
-    for soc in ["15-1251.00", "11-1011.00"]:
-        print("\nSOC:", soc)
-        for k, v in ws_traits[soc].scores.items():
-            print(f"  {k}: {v:.2f}")
-
-    print("\n\n=====TRAITS (FROM WA)=====")
-
-    wa_traits = build_traits_from_work_activities()
-
-    for soc in ["15-1251.00", "11-1011.00"]:
-        print("\nSOC:", soc)
-        for k, v in wa_traits[soc].scores.items():
-            print(f"  {k}: {v:.2f}")
-
-    print("\n\n=====VALUES=====")
-
-    values = build_values_from_work_values()
-
-    for soc in ["15-1251.00", "11-1011.00"]:
-        print("\nSOC:", soc)
-        for k, v in values[soc].scores.items():
-            print(f"  {k}: {v:.2f}")
-
-    print("\n\n=====TRAITS=====")
-
-    traits = merge_traits(ws_traits, wa_traits)
-
-    for soc in ["15-1251.00", "11-1011.00"]:
-        print("\nSOC:", soc)
-        for k, v in traits[soc].scores.items():
-            print(f"  {k}: {v:.2f}")
-
-    print("\n\n=====WORK STYLES=====")
-
-    ws = derive_work_styles(traits)
-
-    for soc in ["15-1251.00", "11-1011.00"]:
-        print("\nSOC:", soc)
-        for k, v in ws[soc].scores.items():
-            print(f"  {k}: {v:.2f}")
+    read_career_profile(profiles['15-1252.00'])

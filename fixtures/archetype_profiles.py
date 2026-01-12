@@ -1,4 +1,9 @@
-from career_components import Traits, Interests, Aptitudes, Values, WorkStyles
+from core.career_components import Traits, Interests, Aptitudes, Values, WorkStyles
+
+"""
+Hand-authored archetype profiles for testing and UI prototyping.
+Not part of the O*NET-derived career pipeline.
+"""
 
 
 CAREER_PROFILES = {

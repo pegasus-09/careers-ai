@@ -1,6 +1,14 @@
 from math import sqrt
-from core.career_profiles import CAREER_PROFILES
-from scripts.sample import sample_profile
+from fixtures.archetype_profiles import CAREER_PROFILES
+from scripts.sample import build_test_profile
+
+"""
+LEGACY PROTOTYPE
+
+Early cosine-similarity matcher for hand-authored career archetypes.
+Not used in the O*NET-based matching system.
+Preserved for reference only.
+"""
 
 BASE_WEIGHTS = {
     "traits": 1.0,
@@ -125,6 +133,7 @@ def rank_careers(user_profile, careers=CAREER_PROFILES):
     return sorted(scored, key=lambda x: x[1], reverse=True)
 
 
+sample_profile = build_test_profile()
 selected_cluster = select_cluster(sample_profile)
 
 filtered_careers = filter_by_cluster(
