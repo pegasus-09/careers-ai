@@ -5,6 +5,7 @@ from matching.intersts import match_interests
 from matching.traits import match_traits
 from matching.values import match_values
 from matching.work_styles import match_work_styles
+from matching.aggregate import aggregate_match
 
 """
 Matching orchestration layer.
@@ -24,10 +25,13 @@ def match_user_to_role(
 
     psych = user.psychometrics
 
-    return {
+    component_scores = {
         "aptitudes": match_aptitudes(psych.aptitudes, role.aptitudes),
         "interests": match_interests(psych.interests, role.interests),
         "traits": match_traits(psych.traits, role.traits),
         "values": match_values(psych.values, role.values),
         "work_styles": match_work_styles(psych.work_styles, role.work_styles),
     }
+
+    component_scores["total"] = aggregate_match(component_scores)
+    return component_scores

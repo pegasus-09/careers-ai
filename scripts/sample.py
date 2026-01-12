@@ -5,18 +5,18 @@ from inference.ai_interpreter import interpret_profile
 
 def build_test_profile():
     traits = Traits({
-        "analytical": 0.80,
-        "creative": 0.35,
-        "social": 0.40,
-        "leadership": 0.30,
-        "detail_oriented": 0.75,
-        "adaptability": 0.50
+        "analytical": 0.5,
+        "creative": 0.2,
+        "social": 0.8,
+        "leadership": 0.70,
+        "detail_oriented": 0.7,
+        "adaptability": 0.6
     })
 
     interests = Interests({
-        "technology": 0.85,
-        "science": 0.70,
-        "business": 0.40,
+        "technology": 0.9,
+        "science": 0.4,
+        "business": 0.8,
         "arts": 0.20,
         "social_impact": 0.30,
         "hands_on": 0.55

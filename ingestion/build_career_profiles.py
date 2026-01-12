@@ -409,7 +409,7 @@ def build_all_career_profiles():
                                        ints.get(soc_code, Interests()),
                                        tr.get(soc_code, Traits()),
                                        vals.get(soc_code, Values()),
-                                       ws.get(soc_code, WorkStyles))
+                                       ws.get(soc_code, WorkStyles()))
         soc_profiles[soc_code] = career_profile
 
     return soc_profiles

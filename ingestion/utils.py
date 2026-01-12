@@ -4,3 +4,5 @@ def clamp(value):
     elif value > 1:
         value = 1.0
     return value
+
+

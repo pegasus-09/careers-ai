@@ -18,14 +18,13 @@ def main():
 
         print(f"\nSOC {soc}")
 
-        print("User WS:", user.psychometrics.work_styles.scores)
-        print("Role WS:", role.work_styles.scores)
-
         print(f"  aptitudes: {result['aptitudes']:.3f}")
         print(f"  interests: {result['interests']:.3f}")
         print(f"  traits: {result['traits']:.3f}")
         print(f"  values: {result['values']:.3f}")
         print(f"  work styles: {result['work_styles']:.3f}")
+
+        print(f"AGGREGATE: {result['total']}")
 
 
 if __name__ == "__main__":

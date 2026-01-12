@@ -1,6 +1,5 @@
 from core.career_components import WorkStyles
 
-
 def match_work_styles(
     user_ws: WorkStyles,
     role_ws: WorkStyles,

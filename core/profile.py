@@ -2,7 +2,7 @@ from core.career_components import Traits, Interests, Aptitudes, Values, WorkSty
 
 
 class PsychometricProfile:
-    def __init__(self, traits=Traits(), interests=Interests(), aptitudes=Aptitudes(), values=Values(), work_styles=WorkStyles()):
+    def __init__(self, aptitudes=Aptitudes(), interests=Interests(), traits=Traits(), values=Values(), work_styles=WorkStyles()):
         self.traits = traits
         self.interests = interests
         self.aptitudes = aptitudes
