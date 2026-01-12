@@ -75,7 +75,7 @@ def run_quiz() -> Dict[str, int]:
     print("1 = Strongly disagree | 5 = Strongly agree")
     print("Press Enter to skip\n")
 
-    answers: Dict[str, int] = {}
+    ans: Dict[str, int] = {}
 
     for q in QUESTIONS:
         while True:
@@ -85,19 +85,19 @@ def run_quiz() -> Dict[str, int]:
                 break
 
             if raw.isdigit() and 1 <= int(raw) <= 5:
-                answers[q.id] = int(raw)
+                ans[q.id] = int(raw)
                 break
 
             print("Invalid input. Enter 1–5 or press Enter to skip.")
 
-    return answers
+    return ans
 
 
 # -----------------------------
 # Build component instances
 # -----------------------------
 
-def build_components(answers: Dict[str, int]):
+def build_components(ans: Dict[str, int]):
     buckets = {
         "aptitudes": {},
         "interests": {},
@@ -107,10 +107,10 @@ def build_components(answers: Dict[str, int]):
     }
 
     for q in QUESTIONS:
-        if q.id not in answers:
+        if q.id not in ans:
             continue
 
-        buckets[q.component].setdefault(q.dimension, []).append(answers[q.id])
+        buckets[q.component].setdefault(q.dimension, []).append(ans[q.id])
 
     def avg_normalized(d: Dict[str, List[int]]) -> Dict[str, float]:
         return {
@@ -138,9 +138,7 @@ if __name__ == "__main__":
     socs = load_soc_title_mapping()
 
     print("\nQuiz Results:\n")
-    # print(socs)
     ranking = rank_profiles(user_profile)[1]
-    # print(ranking)
 
     for i in range(1, 6):
         print(f"{i}. SOC {socs.get(ranking[i][0])}")
