@@ -138,9 +138,7 @@ if __name__ == "__main__":
     socs = load_soc_title_mapping()
 
     print("\nQuiz Results:\n")
-    # print(socs)
     ranking = rank_profiles(user_profile)[1]
-    # print(ranking)
 
     for i in range(1, 6):
         print(f"{i}. SOC {socs.get(ranking[i][0])}")
