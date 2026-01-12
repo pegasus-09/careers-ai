@@ -3,7 +3,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Literal
 
-from core.career_components import Traits, Aptitudes, Interests, Values
+from core.career_components import Traits, Aptitudes, Interests, Values, WorkStyles
 from data.onet.mappings import ABILITY_MAP, INTEREST_MAP, WORK_STYLE_MAP, WORK_ACTIVITY_MAP, WORK_VALUE_MAP
 
 
@@ -55,7 +55,7 @@ def normalise(value: float, scale: Literal["LV", "IM", "IH", "OI", "WI", "DR", "
     else: raise ValueError(f"Unknown scale: {scale}")
 
 
-def build_aptitudes_from_abilities():
+def build_aptitudes_from_abilities() -> dict[str, Aptitudes]:
     """
     Loads O*NET Abilities.txt and maps them to internal aptitude dimensions.
     Returns: dict[SOC_code -> dict[aptitude_name -> list[values]]]
@@ -98,7 +98,7 @@ def build_aptitudes_from_abilities():
     return aptitudes_by_career
 
 
-def build_interests():
+def build_interests() -> dict[str, Interests]:
     data = defaultdict(lambda: defaultdict(list))
 
     with open(INTERESTS_FILE, encoding="utf-8") as f:
@@ -137,7 +137,7 @@ def build_interests():
     return interests_by_career
 
 
-def build_traits_from_work_styles():
+def build_traits_from_work_styles() -> dict[str, Traits]:
     data = defaultdict(lambda: defaultdict(list))
 
     with open(WORK_STYLES_FILE, encoding="utf-8") as f:
@@ -177,7 +177,7 @@ def build_traits_from_work_styles():
     return traits_by_career
 
 
-def build_traits_from_work_activities():
+def build_traits_from_work_activities() -> dict[str, Traits]:
     data = defaultdict(lambda: defaultdict(lambda: {"LV": [], "IM": []}))
 
     with open(WORK_ACTIVITIES_FILE, encoding="utf-8") as f:
@@ -217,7 +217,7 @@ def build_traits_from_work_activities():
     return traits_by_career
 
 
-def build_values_from_work_values():
+def build_values_from_work_values() -> dict[str, Values]:
     """
     Builds the Values component from O*NET Work Values data.
 
@@ -334,6 +334,44 @@ def merge_traits(
     return merged_by_soc
 
 
+def derive_work_styles(
+    traits_by_soc: dict[str, Traits],
+) -> dict[str, WorkStyles]:
+    """
+    Derives WorkStyles from merged Traits.
+
+    WorkStyles are interpretive environment descriptors,
+    computed deterministically from Traits.
+    """
+
+    work_styles_by_soc = {}
+
+    for soc_code, soc_traits in traits_by_soc.items():
+        t = soc_traits.scores
+
+        # Default missing traits to 0.0
+        # analytical = t.get("analytical", 0.0) (Unused)
+        creative = t.get("creative", 0.0)
+        social = t.get("social", 0.0)
+        leadership = t.get("leadership", 0.0)
+        detail_oriented = t.get("detail_oriented", 0.0)
+        adaptability = t.get("adaptability", 0.0)
+
+        # Assigning WS
+        team_based = social + leadership
+        structure = detail_oriented - adaptability
+        pace = leadership + adaptability
+        ambiguity_tolerance = adaptability + creative - detail_oriented
+
+        work_styles_by_soc[soc_code] = WorkStyles({
+            "team_based": team_based,
+            "structure": structure,
+            "pace": pace,
+            "ambiguity_tolerance": ambiguity_tolerance,
+        })
+
+    return work_styles_by_soc
+
 if __name__ == "__main__":
     aptitudes = build_aptitudes_from_abilities()
 
@@ -388,3 +426,11 @@ if __name__ == "__main__":
         for k, v in traits[soc].scores.items():
             print(f"  {k}: {v:.2f}")
 
+    print("\n\n=====WORK STYLES=====")
+
+    ws = derive_work_styles(traits)
+
+    for soc in ["15-1251.00", "11-1011.00"]:
+        print("\nSOC:", soc)
+        for k, v in ws[soc].scores.items():
+            print(f"  {k}: {v:.2f}")
