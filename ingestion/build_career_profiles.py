@@ -296,6 +296,44 @@ def build_values_from_work_values():
     return values_by_career
 
 
+def merge_traits(
+    ws_traits_by_soc: dict[str, Traits],
+    wa_traits_by_soc: dict[str, Traits],
+) -> dict[str, Traits]:
+    """
+    Merge Traits from Work Styles (WI-based) and Work Activities (LV+IM-based).
+
+    Rules:
+    - Traits are additive across sources
+    - Missing traits default to 0
+    - WI sign is preserved
+    - No normalization or weighting at merge time
+    """
+
+    from collections import defaultdict
+
+    merged_by_soc = {}
+
+    all_socs = set(ws_traits_by_soc) | set(wa_traits_by_soc)
+
+    for soc_code in all_socs:
+        merged_scores = defaultdict(float)
+
+        work_style_traits = ws_traits_by_soc.get(soc_code)
+        if work_style_traits:
+            for trait_name, value in work_style_traits.scores.items():
+                merged_scores[trait_name] += value
+
+        work_activity_traits = wa_traits_by_soc.get(soc_code)
+        if work_activity_traits:
+            for trait_name, value in work_activity_traits.scores.items():
+                merged_scores[trait_name] += value
+
+        merged_by_soc[soc_code] = Traits(dict(merged_scores))
+
+    return merged_by_soc
+
+
 if __name__ == "__main__":
     aptitudes = build_aptitudes_from_abilities()
 
@@ -339,5 +377,14 @@ if __name__ == "__main__":
     for soc in ["15-1251.00", "11-1011.00"]:
         print("\nSOC:", soc)
         for k, v in values[soc].scores.items():
+            print(f"  {k}: {v:.2f}")
+
+    print("\n\n=====TRAITS=====")
+
+    traits = merge_traits(ws_traits, wa_traits)
+
+    for soc in ["15-1251.00", "11-1011.00"]:
+        print("\nSOC:", soc)
+        for k, v in traits[soc].scores.items():
             print(f"  {k}: {v:.2f}")
 
