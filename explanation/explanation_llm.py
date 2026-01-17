@@ -28,10 +28,7 @@ class ExplanationEngine:
         self,
         user_profile: Dict[str, Dict[str, float]],
         career_meta: Dict[str, str],
-        component_scores: Dict[str, float],
-        alignments: List[Dict[str, Any]],
-        frictions: List[Dict[str, Any]],
-        total_score: float,
+        scores
     ) -> str:
         """
         Generate a human-readable explanation for a single career result.
@@ -43,10 +40,7 @@ class ExplanationEngine:
         explanation_input = self._build_explanation_input(
             user_profile=user_profile,
             career_meta=career_meta,
-            component_scores=component_scores,
-            alignments=alignments,
-            frictions=frictions,
-            total_score=total_score,
+            scores=scores,
         )
 
         prompt = self._build_prompt(explanation_input)
@@ -60,10 +54,7 @@ class ExplanationEngine:
         self,
         user_profile: Dict[str, Dict[str, float]],
         career_meta: Dict[str, str],
-        component_scores: Dict[str, float],
-        alignments: List[Dict[str, Any]],
-        frictions: List[Dict[str, Any]],
-        total_score: float,
+        scores,
     ) -> Dict[str, Any]:
         """
         Canonical explanation input.
@@ -84,12 +75,7 @@ class ExplanationEngine:
                 "values": "What the user wants to be rewarded with",
                 "work_styles": "What kind of work environment the user prefers",
             },
-            "scores": {
-                "total": total_score,
-                "by_component": component_scores,
-            },
-            "key_alignments": alignments,
-            "key_frictions": frictions,
+            "scores": scores,
             "user_snapshot": user_profile,
         }
 
@@ -108,6 +94,8 @@ Rules you must follow:
 - Do NOT give advice or recommendations.
 - Do NOT compare this career to others.
 - Do NOT judge the user.
+- Do NOT use markdown or text-formatting such as bolding
+- Do NOT mention raw numerical data
 - Base every statement strictly on the provided data.
 
 Explain clearly:
@@ -148,119 +136,119 @@ Here is the factual data you must rely on:
         return response.choices[0].message.content
 
 
-if __name__ == "__main__":
-
-    # -----------------------------
-    # Sample user profile snapshot
-    # -----------------------------
-
-    user_profile_snapshot = {
-        "aptitudes": {
-            "numerical_reasoning": 0.78,
-            "verbal_reasoning": 0.64,
-            "spatial_reasoning": 0.41,
-            "logical_reasoning": 0.82,
-            "memory": 0.69,
-        },
-        "interests": {
-            "technology": 0.86,
-            "science": 0.72,
-            "business": 0.33,
-            "arts": 0.28,
-            "social_impact": 0.44,
-            "hands_on": 0.31,
-        },
-        "traits": {
-            "analytical": 0.81,
-            "creative": 0.47,
-            "social": 0.29,
-            "leadership": 0.22,
-            "detail_oriented": 0.74,
-            "adaptability": 0.38,
-        },
-        "values": {
-            "stability": 0.62,
-            "financial_security": 0.71,
-            "prestige": 0.26,
-            "autonomy": 0.68,
-            "helping_others": 0.41,
-            "work_life_balance": 0.77,
-        },
-        "work_styles": {
-            "team_based": 0.34,
-            "structure": 0.73,
-            "pace": 0.52,
-            "ambiguity_tolerance": 0.29,
-        },
-    }
-
-    # -----------------------------
-    # Career metadata
-    # -----------------------------
-
-    career_meta = {
-        "soc": "15-1251.00",
-        "title": "Software Developer",
-    }
-
-    # -----------------------------
-    # Deterministic engine outputs
-    # -----------------------------
-
-    component_scores = {
-        "aptitudes": 0.64,
-        "interests": 0.71,
-        "traits": -0.12,
-        "values": 0.19,
-        "work_styles": 0.06,
-    }
-
-    top_alignments = [
-        {
-            "component": "interests",
-            "dimension": "technology",
-            "value": 0.86,
-            "reason": "Strong interest in technology-heavy work",
-        },
-        {
-            "component": "aptitudes",
-            "dimension": "logical_reasoning",
-            "value": 0.82,
-            "reason": "High logical reasoning capacity aligns with problem-solving demands",
-        },
-    ]
-
-    top_frictions = [
-        {
-            "component": "traits",
-            "dimension": "leadership",
-            "value": 0.22,
-            "reason": "Role places some emphasis on leadership and initiative",
-        },
-        {
-            "component": "work_styles",
-            "dimension": "team_based",
-            "value": 0.34,
-            "reason": "Preference for independent work over collaborative environments",
-        },
-    ]
-
-    total_score = 1.48
-
-    # -----------------------------
-    # Run explanation engine
-    # -----------------------------
-
-    engine = ExplanationEngine()
-
-    explanation_text = engine.explain_career(
-        user_profile=user_profile_snapshot,
-        career_meta=career_meta,
-        component_scores=component_scores,
-        alignments=top_alignments,
-        frictions=top_frictions,
-        total_score=total_score,
-    )
-
-    print("\n--- Career Explanation ---\n")
-    print(explanation_text)
+# if __name__ == "__main__":
+#
+#     # -----------------------------
+#     # Sample user profile snapshot
+#     # -----------------------------
+#
+#     user_profile_snapshot = {
+#         "aptitudes": {
+#             "numerical_reasoning": 0.78,
+#             "verbal_reasoning": 0.64,
+#             "spatial_reasoning": 0.41,
+#             "logical_reasoning": 0.82,
+#             "memory": 0.69,
+#         },
+#         "interests": {
+#             "technology": 0.86,
+#             "science": 0.72,
+#             "business": 0.33,
+#             "arts": 0.28,
+#             "social_impact": 0.44,
+#             "hands_on": 0.31,
+#         },
+#         "traits": {
+#             "analytical": 0.81,
+#             "creative": 0.47,
+#             "social": 0.29,
+#             "leadership": 0.22,
+#             "detail_oriented": 0.74,
+#             "adaptability": 0.38,
+#         },
+#         "values": {
+#             "stability": 0.62,
+#             "financial_security": 0.71,
+#             "prestige": 0.26,
+#             "autonomy": 0.68,
+#             "helping_others": 0.41,
+#             "work_life_balance": 0.77,
+#         },
+#         "work_styles": {
+#             "team_based": 0.34,
+#             "structure": 0.73,
+#             "pace": 0.52,
+#             "ambiguity_tolerance": 0.29,
+#         },
+#     }
+#
+#     # -----------------------------
+#     # Career metadata
+#     # -----------------------------
+#
+#     career_meta = {
+#         "soc": "15-1251.00",
+#         "title": "Software Developer",
+#     }
+#
+#     # -----------------------------
+#     # Deterministic engine outputs
+#     # -----------------------------
+#
+#     component_scores = {
+#         "aptitudes": 0.64,
+#         "interests": 0.71,
+#         "traits": -0.12,
+#         "values": 0.19,
+#         "work_styles": 0.06,
+#     }
+#
+#     top_alignments = [
+#         {
+#             "component": "interests",
+#             "dimension": "technology",
+#             "value": 0.86,
+#             "reason": "Strong interest in technology-heavy work",
+#         },
+#         {
+#             "component": "aptitudes",
+#             "dimension": "logical_reasoning",
+#             "value": 0.82,
+#             "reason": "High logical reasoning capacity aligns with problem-solving demands",
+#         },
+#     ]
+#
+#     top_frictions = [
+#         {
+#             "component": "traits",
+#             "dimension": "leadership",
+#             "value": 0.22,
+#             "reason": "Role places some emphasis on leadership and initiative",
+#         },
+#         {
+#             "component": "work_styles",
+#             "dimension": "team_based",
+#             "value": 0.34,
+#             "reason": "Preference for independent work over collaborative environments",
+#         },
+#     ]
+#
+#     total_score = 1.48
+#
+#     # -----------------------------
+#     # Run explanation engine
+#     # -----------------------------
+#
+#     engine = ExplanationEngine()
+#
+#     explanation_text = engine.explain_career(
+#         user_profile=user_profile_snapshot,
+#         career_meta=career_meta,
+#         component_scores=component_scores,
+#         alignments=top_alignments,
+#         frictions=top_frictions,
+#         total_score=total_score,
+#     )
+#
+#     print("\n--- Career Explanation ---\n")
+#     print(explanation_text)
