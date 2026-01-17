@@ -7,7 +7,7 @@ from ingestion.utils import clamp
 from models.career_components import Traits, Interests, Aptitudes, Values, WorkStyles
 from rank_all_careers import rank_profiles
 from ingestion.read_occupation_data import load_soc_title_mapping
-from explanation.explanation_llm import ExplanationEngine
+
 
 # -----------------------------
 # Question definition
