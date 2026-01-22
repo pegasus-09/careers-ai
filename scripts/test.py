@@ -5,7 +5,7 @@ import json
 from models.profile import PsychometricProfile
 from ingestion.utils import clamp
 from models.career_components import Traits, Interests, Aptitudes, Values, WorkStyles
-from rank_all_careers import rank_profiles
+from scripts.rank_all_careers import rank_profiles
 from ingestion.read_occupation_data import load_soc_title_mapping
 
 
@@ -133,32 +133,32 @@ def build_components(ans: Dict[str, int]):
 # -----------------------------
 
 if __name__ == "__main__":
-    # answers = run_quiz()
-    answers = json.load(open("answers.json"))
-
+    answers = run_quiz()
+    # answers = json.load(open("answers.json"))
+    #
     aptitudes, interests, traits, values, work_styles = build_components(answers)
     user_profile = PsychometricProfile(aptitudes, interests, traits, values, work_styles)
     socs = load_soc_title_mapping()
     data, ranking = rank_profiles(user_profile)
-
+    #
     TOP_RANKS = 20
 
-    correct = input("Answer SOC? ").title()
-    if correct:
-        if '.' not in correct:
-            correct += '.00'
-        career = socs.get(correct)
-        soc_to_index = {soc: i for i, (soc, _) in enumerate(ranking)}
-        index = next(
-            (i for i, (soc, _) in enumerate(ranking) if soc == correct),
-            None
-        )
-        print(f"{correct} ({career}) is ranked {index + 1}")
-    print(f"\nTop {TOP_RANKS} Careers:\n")
+    # correct = input("Answer SOC? ").title()
+    # if correct:
+    #     if '.' not in correct:
+    #         correct += '.00'
+    #     career = socs.get(correct)
+    #     soc_to_index = {soc: i for i, (soc, _) in enumerate(ranking)}
+    #     index = next(
+    #         (i for i, (soc, _) in enumerate(ranking) if soc == correct),
+    #         None
+    #     )
+    #     print(f"{correct} ({career}) is ranked {index + 1}")
+    # print(f"\nTop {TOP_RANKS} Careers:\n")
     print(ranking[:TOP_RANKS])
-
-    for i in range(0, TOP_RANKS):
-        print(f"{i+1}. {socs.get(ranking[i][0])}")
+    #
+    # for i in range(0, TOP_RANKS):
+    #     print(f"{i+1}. {socs.get(ranking[i][0])}")
 
     # print(f"\nExplanation for {socs.get(ranking[1][0])}\n")
     # explain = ExplanationEngine()
