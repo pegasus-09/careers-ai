@@ -1,2 +1,4 @@
-openai~=2.14.0
+openai>=2.14.0
 fastapi
+uvicorn
+numpy
