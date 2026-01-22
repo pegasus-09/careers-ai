@@ -9,7 +9,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://YOUR_FRONTEND.vercel.app",
+        "https://launchpad-next-tau.vercel.app",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
