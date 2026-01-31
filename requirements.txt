@@ -2,3 +2,5 @@ openai>=2.14.0
 fastapi
 uvicorn
 numpy
+requests
+python-dotenv

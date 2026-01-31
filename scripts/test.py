@@ -98,7 +98,7 @@ def run_quiz() -> Dict[str, int]:
 # Build component instances
 # -----------------------------
 
-def build_components(ans: Dict[str, int]):
+def build_profile_from_ans(ans: Dict[str, int]):
     buckets = {
         "aptitudes": {},
         "interests": {},
@@ -119,7 +119,7 @@ def build_components(ans: Dict[str, int]):
             for k, v in d.items()
         }
 
-    return (
+    return PsychometricProfile(
         Aptitudes(avg_normalized(buckets["aptitudes"])),
         Interests(avg_normalized(buckets["interests"])),
         Traits(avg_normalized(buckets["traits"])),
@@ -136,8 +136,7 @@ if __name__ == "__main__":
     answers = run_quiz()
     # answers = json.load(open("answers.json"))
     #
-    aptitudes, interests, traits, values, work_styles = build_components(answers)
-    user_profile = PsychometricProfile(aptitudes, interests, traits, values, work_styles)
+    user_profile = build_profile_from_ans(answers)
     socs = load_soc_title_mapping()
     data, ranking = rank_profiles(user_profile)
     #
