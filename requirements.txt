@@ -1,7 +1,18 @@
-openai>=2.14.0
-fastapi
-uvicorn
-numpy
-requests
-python-dotenv
-reportlab
+# FastAPI and server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# HTTP client for Supabase REST API
+httpx>=0.27.0
+
+# Existing dependencies (keep these)
+pandas>=2.1.4
+numpy>=1.26.3
+scikit-learn>=1.4.0
+pydantic>=2.5.3
+pydantic-settings>=2.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+

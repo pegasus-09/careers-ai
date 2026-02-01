@@ -1,279 +1,369 @@
-import os
-from typing import Dict, Any
-from dotenv import load_dotenv
-
-import requests
-from fastapi import FastAPI, HTTPException
+"""
+FastAPI application for LaunchPad School Career Guidance System
+Uses Supabase REST API (no pyroaring dependency)
+"""
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from typing import Dict, List, Optional
+from pydantic import BaseModel
 
-from link.service import run_assessment, build_profile_from_ans
-from portfolio.analysis import analyse_portfolio
-from scripts.format import format_text
+# Internal imports
+from auth import get_current_user, AuthUser
+from authorization import require_admin, require_teacher, require_student, require_profile
+from database import get_user_profile, upsert_assessment_result, Profile, UserRole
+from supabase_client import supabase_client
 
-from io import BytesIO
-from datetime import datetime
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from reportlab.lib import colors
+# Import existing matching logic
+from scripts.rank_all_careers import rank_profiles
+from inference.answer_converter import convert_answers_to_profile
 
+app = FastAPI(title="LaunchPad Career Guidance API", version="2.0.0")
 
-# -------------------------------------------------------------------
-# App setup
-# -------------------------------------------------------------------
-
-load_dotenv()
-app = FastAPI()
-
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://launchpad-next-tau.vercel.app",
-    ],
+    allow_origins=["*"],  # Update with your frontend URL in production
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------------------------------------------------
-# Supabase REST configuration (NO supabase-py)
-# -------------------------------------------------------------------
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
+# ============================================================================
+# REQUEST/RESPONSE MODELS
+# ============================================================================
+
+class AssessmentSubmission(BaseModel):
+    """Assessment answers from frontend"""
+    answers: Dict[str, int]
 
 
-def supabase_upsert(table: str, record: Dict[str, Any]) -> None:
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
+class AssessmentResponse(BaseModel):
+    """Response after assessment submission"""
+    ranking: List[List]
+    profile_data: Dict
+    message: str
 
-    headers = {
-        "apikey": SUPABASE_SECRET_KEY,
-        "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates",
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+
+@app.get("/")
+def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "service": "LaunchPad Career Guidance API",
+        "version": "2.0.0"
     }
 
-    response = requests.post(url, headers=headers, json=record)
 
-    if response.status_code not in (200, 201, 204):
-        raise HTTPException(
-            status_code=500,
-            detail=f"Supabase error {response.status_code}: {response.text}",
-        )
+# ============================================================================
+# STUDENT ENDPOINTS
+# ============================================================================
 
+@app.post("/student/assessment", response_model=AssessmentResponse)
+async def submit_assessment(
+    submission: AssessmentSubmission,
+    user: AuthUser = Depends(get_current_user)
+):
+    """Student submits assessment answers and gets career rankings"""
+    import time
+    start_time = time.time()
+    print("hi this is a test")
 
-def supabase_select_one(table: str, column: str, value: str) -> Dict[str, Any] | None:
-    url = f"{SUPABASE_URL}/rest/v1/{table}?{column}=eq.{value}&limit=1"
-
-    headers = {
-        "apikey": SUPABASE_SECRET_KEY,
-        "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
-    }
-
-    response = requests.get(url, headers=headers)
-
-    if response.status_code != 200:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Supabase error {response.status_code}: {response.text}",
-        )
-
-    data = response.json()
-    return data[0] if data else None
-
-
-# -------------------------------------------------------------------
-# Routes
-# -------------------------------------------------------------------
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-
-@app.post("/assessment")
-def assess(answers: Dict[str, int]):
-    ranking = run_assessment(answers)
-    return {"ranking": ranking}
-
-
-@app.post("/portfolio/generate")
-def generate_portfolio(answers: Dict[str, int]):
     try:
-        profile = build_profile_from_ans(answers)
-        return analyse_portfolio(profile)
+        # Get user profile
+        profile = await get_user_profile(user.user_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        # Verify student role
+        if profile.role != UserRole.STUDENT:
+            raise HTTPException(status_code=403, detail="Student access required")
+
+        answers = submission.answers
+        print(f"[TIMING] Profile fetch: {time.time() - start_time:.2f}s")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"[ERROR] Initial setup failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Setup error: {str(e)}")
 
+    # Validate answers
+    required_ids = (
+        [f"A{i}" for i in range(1, 6)] +
+        [f"I{i}" for i in range(1, 7)] +
+        [f"T{i}" for i in range(1, 7)] +
+        [f"V{i}" for i in range(1, 7)] +
+        [f"W{i}" for i in range(1, 5)]
+    )
 
-@app.post("/portfolio/save")
-def save_portfolio(payload: Dict[str, Any]):
-    required_fields = {"user_id", "strengths", "gaps"}
-
-    if not required_fields.issubset(payload):
+    missing = [qid for qid in required_ids if qid not in answers]
+    if missing:
         raise HTTPException(
             status_code=400,
-            detail=f"Missing required fields: {required_fields - payload.keys()}",
+            detail=f"Missing required questions: {', '.join(missing)}"
         )
 
-    record = {
-        "user_id": payload["user_id"],
-        "strengths": payload["strengths"],
-        "gaps": payload["gaps"],
-        "projects": payload.get("projects", []),
-        "bio": payload.get("bio"),
-    }
+    # Convert answers to psychometric profile
+    try:
+        convert_start = time.time()
+        user_psychometrics = convert_answers_to_profile(answers)
+        print(f"[TIMING] Convert answers: {time.time() - convert_start:.2f}s")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error converting answers: {str(e)}")
 
-    supabase_upsert("portfolio_snapshots", record)
+    # Rank careers using the profile
+    try:
+        rank_start = time.time()
+        print("[TIMING] Starting rank_profiles...")
+        _results, ranking = rank_profiles(user_psychometrics)
+        print(f"[TIMING] Rank careers: {time.time() - rank_start:.2f}s")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error ranking careers: {str(e)}")
 
-    return {"ok": True}
+    # Store raw answers as profile data
+    profile_data = {"raw_scores": answers}
+    print("THIS IS A CHECK")
 
-
-@app.get("/portfolio")
-def get_portfolio(user_id: str):
-    return supabase_select_one("portfolio_snapshots", "user_id", user_id)
-
-
-@app.get("/portfolio/export/pdf")
-def export_portfolio_pdf(user_id: str):
-    portfolio = supabase_select_one(
-        "portfolio_snapshots", "user_id", user_id
-    )
-
-    if not portfolio:
-        raise HTTPException(
-            status_code=404,
-            detail="Portfolio not found",
+    # Save to database
+    try:
+        save_start = time.time()
+        success = await upsert_assessment_result(
+            user_id=profile.id,
+            school_id=profile.school_id,
+            raw_answers=answers,
+            ranking=ranking,
+            profile_data=profile_data,
+            user_token=user.token  # Pass user's token for RLS
         )
+        print(f"[TIMING] Database save: {time.time() - save_start:.2f}s")
 
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=72,
-        leftMargin=72,
-        topMargin=72,
-        bottomMargin=72,
+        if not success:
+            print("OOPS")
+            raise HTTPException(status_code=500, detail="Failed to save assessment results")
+    except Exception as e:
+        print(f"Assessment save error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to save: {str(e)}")
+
+    print(f"[TIMING] Total time: {time.time() - start_time:.2f}s")
+
+    return AssessmentResponse(
+        ranking=ranking,
+        profile_data=profile_data,
+        message="Assessment completed successfully"
     )
 
-    # Define custom styles
-    styles = getSampleStyleSheet()
 
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        textColor=colors.HexColor('#1a1a1a'),
-        spaceAfter=12,
-        alignment=TA_CENTER,
-        fontName='Helvetica-Bold'
-    )
+@app.get("/student/profile")
+async def get_student_profile_data(
+    profile: Profile = Depends(require_student)
+):
+    """Get complete student profile"""
+    try:
+        # Get assessment
+        query = await supabase_client.query("assessment_results")
+        assessment_result = await query.select("*").eq("user_id", profile.id).execute()
+        assessment = assessment_result["data"][0] if assessment_result["data"] else None
 
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading2'],
-        fontSize=14,
-        textColor=colors.HexColor('#2c3e50'),
-        spaceAfter=12,
-        spaceBefore=20,
-        fontName='Helvetica-Bold',
-        borderWidth=0,
-        borderColor=colors.HexColor('#3498db'),
-        borderPadding=8,
-        leftIndent=0,
-    )
+        # Get classes
+        query = await supabase_client.query("student_classes")
+        classes_result = await query.select("*").eq("student_id", profile.id).execute()
 
-    body_style = ParagraphStyle(
-        'CustomBody',
-        parent=styles['Normal'],
-        fontSize=11,
-        textColor=colors.HexColor('#333333'),
-        spaceAfter=6,
-        leading=14,
-        leftIndent=0,
-    )
+        # Get comments
+        query = await supabase_client.query("teacher_comments")
+        comments_result = await query.select("*").eq("student_id", profile.id).execute()
 
-    bullet_style = ParagraphStyle(
-        'CustomBullet',
-        parent=styles['Normal'],
-        fontSize=11,
-        textColor=colors.HexColor('#333333'),
-        spaceAfter=6,
-        leftIndent=20,
-        bulletIndent=10,
-        leading=14,
-    )
+        # Get attributes
+        query = await supabase_client.query("student_attributes")
+        attributes_result = await query.select("*").eq("student_id", profile.id).execute()
 
-    # Build document content
-    story = [Paragraph("Professional Portfolio", title_style)]
+        # Get experiences
+        query = await supabase_client.query("work_experiences")
+        experiences_result = await query.select("*").eq("student_id", profile.id).execute()
 
-    # Date
-    date_style = ParagraphStyle(
-        'DateStyle',
-        parent=styles['Normal'],
-        fontSize=10,
-        textColor=colors.HexColor('#7f8c8d'),
-        alignment=TA_CENTER,
-        spaceAfter=30,
-    )
-    story.append(Paragraph(
-        f"Generated on {datetime.now().strftime('%B %d, %Y')}",
-        date_style
-    ))
+        # Get projects
+        query = await supabase_client.query("projects")
+        projects_result = await query.select("*").eq("student_id", profile.id).execute()
 
-    # Divider line
-    story.append(Spacer(1, 0.2 * inch))
+        return {
+            "profile": {
+                "id": profile.id,
+                "full_name": profile.full_name,
+                "email": profile.email,
+                "year_level": profile.year_level
+            },
+            "assessment": assessment,
+            "classes": classes_result["data"],
+            "comments": comments_result["data"],
+            "attributes": attributes_result["data"],
+            "experiences": experiences_result["data"],
+            "projects": projects_result["data"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching profile: {str(e)}")
 
-    # Bio/Summary
-    if portfolio.get("bio"):
-        story.append(Paragraph("Professional Summary", heading_style))
-        story.append(Paragraph(portfolio["bio"], body_style))
-        story.append(Spacer(1, 0.3 * inch))
 
-    # Strengths
-    story.append(Paragraph("Key Strengths", heading_style))
-    strengths = portfolio.get("strengths", [])
-    if strengths:
-        for s in strengths:
-            text = format_text(s.get('signal', ''))
-            story.append(Paragraph(f"• {text}", bullet_style))
-    else:
-        story.append(Paragraph("No strengths listed", body_style))
+@app.post("/student/work-experience")
+async def add_work_experience(
+    title: str,
+    organisation: str,
+    start_date: str,
+    description: Optional[str] = None,
+    end_date: Optional[str] = None,
+    profile: Profile = Depends(require_student)
+):
+    """Student adds work experience"""
+    try:
+        data = {
+            "student_id": profile.id,
+            "title": title,
+            "organisation": organisation,
+            "description": description,
+            "start_date": start_date,
+            "end_date": end_date,
+            "added_by": profile.id
+        }
 
-    story.append(Spacer(1, 0.3 * inch))
+        query = await supabase_client.query("work_experiences")
+        result = await query.insert(data).execute()
 
-    # Growth Areas (formerly Gaps)
-    story.append(Paragraph("Areas for Growth", heading_style))
-    gaps = portfolio.get("gaps", [])
-    if gaps:
-        for g in gaps:
-            text = format_text(g.get('signal', ''))
-            story.append(Paragraph(f"• {text}", bullet_style))
-    else:
-        story.append(Paragraph("No growth areas identified", body_style))
+        if result["error"]:
+            raise Exception(result["error"])
 
-    # Projects
-    projects = portfolio.get("projects", [])
-    if projects:
-        story.append(Spacer(1, 0.3 * inch))
-        story.append(Paragraph("Notable Projects", heading_style))
+        return {"id": result["data"][0]["id"], "message": "Work experience added"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-        for p in projects:
-            title = p.get("title") or "Untitled project"
-            story.append(Paragraph(f"• {format_text(title, False)}", bullet_style))
 
-    # Build PDF
-    doc.build(story)
-    buffer.seek(0)
+# ============================================================================
+# TEACHER ENDPOINTS
+# ============================================================================
 
-    return StreamingResponse(
-        buffer,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": "attachment; filename=professional_portfolio.pdf"
-        },
-    )
+@app.get("/teacher/students")
+async def get_teacher_students(
+    profile: Profile = Depends(require_teacher)
+):
+    """Get all students in teacher's classes"""
+    try:
+        # Get teacher's classes
+        query = await supabase_client.query("classes")
+        classes_result = await query.select("id").eq("teacher_id", profile.id).execute()
 
+        class_ids = [c["id"] for c in classes_result["data"]]
+
+        if not class_ids:
+            return []
+
+        # Get students in those classes
+        query = await supabase_client.query("student_classes")
+        students_result = await query.select("student_id").in_("class_id", class_ids).execute()
+
+        student_ids = list(set([s["student_id"] for s in students_result["data"]]))
+
+        # Get student profiles
+        query = await supabase_client.query("profiles")
+        profiles_result = await query.select("*").in_("id", student_ids).execute()
+
+        return profiles_result["data"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/teacher/comment")
+async def add_teacher_comment(
+    student_id: str,
+    class_id: str,
+    comment_text: str,
+    performance_rating: Optional[int] = None,
+    engagement_rating: Optional[int] = None,
+    profile: Profile = Depends(require_teacher)
+):
+    """Teacher adds comment for student"""
+    try:
+        # Verify teacher teaches this class
+        query = await supabase_client.query("classes")
+        class_check = await query.select("*").eq("id", class_id).eq("teacher_id", profile.id).execute()
+
+        if not class_check["data"]:
+            raise HTTPException(status_code=403, detail="You don't teach this class")
+
+        # Insert comment
+        data = {
+            "student_id": student_id,
+            "teacher_id": profile.id,
+            "class_id": class_id,
+            "comment_text": comment_text,
+            "performance_rating": performance_rating,
+            "engagement_rating": engagement_rating
+        }
+
+        query = await supabase_client.query("teacher_comments")
+        result = await query.insert(data).execute()
+
+        return {"id": result["data"][0]["id"], "message": "Comment added"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# ADMIN ENDPOINTS
+# ============================================================================
+
+@app.get("/admin/students")
+async def get_all_students(
+    profile: Profile = Depends(require_admin)
+):
+    """Admin gets all students in school"""
+    try:
+        query = await supabase_client.query("profiles")
+        result = await query.select("*").eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
+
+        return result["data"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/admin/student/{student_id}")
+async def get_student_details(
+    student_id: str,
+    profile: Profile = Depends(require_admin)
+):
+    """Admin gets detailed student information"""
+    try:
+        # Get student profile
+        query = await supabase_client.query("profiles")
+        student_result = await query.select("*").eq("id", student_id).eq("school_id", profile.school_id).execute()
+
+        if not student_result["data"]:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        student = student_result["data"][0]
+
+        # Get assessment
+        query = await supabase_client.query("assessment_results")
+        assessment_result = await query.select("*").eq("user_id", student_id).execute()
+
+        return {
+            "profile": student,
+            "assessment": assessment_result["data"][0] if assessment_result["data"] else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# RUN SERVER
+# ============================================================================
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
