@@ -1,6 +1,11 @@
 from typing import Dict, List
 from statistics import mean
-import json
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 from models.profile import PsychometricProfile
 from ingestion.utils import clamp
@@ -154,7 +159,7 @@ if __name__ == "__main__":
     #     )
     #     print(f"{correct} ({career}) is ranked {index + 1}")
     # print(f"\nTop {TOP_RANKS} Careers:\n")
-    print(ranking[:TOP_RANKS])
+    print(ranking)
     #
     # for i in range(0, TOP_RANKS):
     #     print(f"{i+1}. {socs.get(ranking[i][0])}")
