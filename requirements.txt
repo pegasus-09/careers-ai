@@ -4,3 +4,4 @@ uvicorn
 numpy
 requests
 python-dotenv
+reportlab
