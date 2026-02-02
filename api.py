@@ -60,13 +60,59 @@ def health_check():
 
 
 # ============================================================================
+# GUEST ENDPOINTS
+# ============================================================================
+
+@app.post("/guest/assessment", response_model=AssessmentResponse)
+async def guest_assessment(submission: AssessmentSubmission):
+    """Guest submits assessment answers and gets career rankings (no auth required)"""
+    answers = submission.answers
+
+    # Validate answers
+    required_ids = (
+            [f"A{i}" for i in range(1, 6)] +
+            [f"I{i}" for i in range(1, 7)] +
+            [f"T{i}" for i in range(1, 7)] +
+            [f"V{i}" for i in range(1, 7)] +
+            [f"W{i}" for i in range(1, 5)]
+    )
+
+    missing = [qid for qid in required_ids if qid not in answers]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required questions: {', '.join(missing)}"
+        )
+
+    # Convert answers to psychometric profile
+    try:
+        user_psychometrics = convert_answers_to_profile(answers)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error converting answers: {str(e)}")
+
+    # Rank careers using the profile
+    try:
+        _results, ranking = rank_profiles(user_psychometrics)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error ranking careers: {str(e)}")
+
+    profile_data = {"raw_scores": answers}
+
+    return AssessmentResponse(
+        ranking=ranking,
+        profile_data=profile_data,
+        message="Assessment completed successfully"
+    )
+
+
+# ============================================================================
 # STUDENT ENDPOINTS
 # ============================================================================
 
 @app.post("/student/assessment", response_model=AssessmentResponse)
 async def submit_assessment(
-    submission: AssessmentSubmission,
-    user: AuthUser = Depends(get_current_user)
+        submission: AssessmentSubmission,
+        user: AuthUser = Depends(get_current_user)
 ):
     """Student submits assessment answers and gets career rankings"""
     import time
@@ -93,11 +139,11 @@ async def submit_assessment(
 
     # Validate answers
     required_ids = (
-        [f"A{i}" for i in range(1, 6)] +
-        [f"I{i}" for i in range(1, 7)] +
-        [f"T{i}" for i in range(1, 7)] +
-        [f"V{i}" for i in range(1, 7)] +
-        [f"W{i}" for i in range(1, 5)]
+            [f"A{i}" for i in range(1, 6)] +
+            [f"I{i}" for i in range(1, 7)] +
+            [f"T{i}" for i in range(1, 7)] +
+            [f"V{i}" for i in range(1, 7)] +
+            [f"W{i}" for i in range(1, 5)]
     )
 
     missing = [qid for qid in required_ids if qid not in answers]
@@ -126,7 +172,6 @@ async def submit_assessment(
 
     # Store raw answers as profile data
     profile_data = {"raw_scores": answers}
-    print("THIS IS A CHECK")
 
     # Save to database
     try:
@@ -142,7 +187,6 @@ async def submit_assessment(
         print(f"[TIMING] Database save: {time.time() - save_start:.2f}s")
 
         if not success:
-            print("OOPS")
             raise HTTPException(status_code=500, detail="Failed to save assessment results")
     except Exception as e:
         print(f"Assessment save error: {str(e)}")
@@ -161,7 +205,7 @@ async def submit_assessment(
 
 @app.get("/student/profile")
 async def get_student_profile_data(
-    profile: Profile = Depends(require_student)
+        profile: Profile = Depends(require_student)
 ):
     """Get complete student profile"""
     try:
@@ -210,12 +254,12 @@ async def get_student_profile_data(
 
 @app.post("/student/work-experience")
 async def add_work_experience(
-    title: str,
-    organisation: str,
-    start_date: str,
-    description: Optional[str] = None,
-    end_date: Optional[str] = None,
-    profile: Profile = Depends(require_student)
+        title: str,
+        organisation: str,
+        start_date: str,
+        description: Optional[str] = None,
+        end_date: Optional[str] = None,
+        profile: Profile = Depends(require_student)
 ):
     """Student adds work experience"""
     try:
@@ -246,7 +290,7 @@ async def add_work_experience(
 
 @app.get("/teacher/students")
 async def get_teacher_students(
-    profile: Profile = Depends(require_teacher)
+        profile: Profile = Depends(require_teacher)
 ):
     """Get all students in teacher's classes"""
     try:
@@ -276,12 +320,12 @@ async def get_teacher_students(
 
 @app.post("/teacher/comment")
 async def add_teacher_comment(
-    student_id: str,
-    class_id: str,
-    comment_text: str,
-    performance_rating: Optional[int] = None,
-    engagement_rating: Optional[int] = None,
-    profile: Profile = Depends(require_teacher)
+        student_id: str,
+        class_id: str,
+        comment_text: str,
+        performance_rating: Optional[int] = None,
+        engagement_rating: Optional[int] = None,
+        profile: Profile = Depends(require_teacher)
 ):
     """Teacher adds comment for student"""
     try:
@@ -318,7 +362,7 @@ async def add_teacher_comment(
 
 @app.get("/admin/students")
 async def get_all_students(
-    profile: Profile = Depends(require_admin)
+        profile: Profile = Depends(require_admin)
 ):
     """Admin gets all students in school"""
     try:
@@ -332,8 +376,8 @@ async def get_all_students(
 
 @app.get("/admin/student/{student_id}")
 async def get_student_details(
-    student_id: str,
-    profile: Profile = Depends(require_admin)
+        student_id: str,
+        profile: Profile = Depends(require_admin)
 ):
     """Admin gets detailed student information"""
     try:
@@ -366,4 +410,5 @@ async def get_student_details(
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
