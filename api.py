@@ -17,6 +17,8 @@ from supabase_client import supabase_client
 from scripts.rank_all_careers import rank_profiles
 from inference.answer_converter import convert_answers_to_profile
 
+from datetime import datetime
+
 app = FastAPI(title="LaunchPad Career Guidance API", version="2.0.0")
 
 # CORS configuration
@@ -50,12 +52,13 @@ class AssessmentResponse(BaseModel):
 # ============================================================================
 
 @app.get("/")
-def health_check():
-    """Health check endpoint"""
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
     return {
         "status": "healthy",
-        "service": "LaunchPad Career Guidance API",
-        "version": "2.0.0"
+        "service": "launchpad-backend",
+        "timestamp": datetime.now().isoformat()
     }
 
 
