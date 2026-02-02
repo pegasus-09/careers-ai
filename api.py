@@ -316,7 +316,7 @@ async def get_teacher_students(
         query = await supabase_client.query("profiles")
         profiles_result = await query.select("*").in_("id", student_ids).execute()
 
-        return profiles_result["data"]
+        return {"students": profiles_result["data"]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
@@ -369,10 +369,39 @@ async def get_all_students(
 ):
     """Admin gets all students in school"""
     try:
+        # Get all students
         query = await supabase_client.query("profiles")
-        result = await query.select("*").eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
+        students_result = await query.select("*").eq("school_id", profile.school_id).eq("role",
+                                                                                        UserRole.STUDENT).execute()
 
-        return result["data"]
+        students = students_result["data"]
+
+        if not students:
+            return {"students": []}
+
+        # Get all student IDs
+        student_ids = [s["id"] for s in students]
+
+        # Get all assessments for these students in one query
+        query = await supabase_client.query("assessment_results")
+        assessments_result = await query.select("user_id").in_("user_id", student_ids).execute()
+
+        # Create set of student IDs who have assessments
+        students_with_assessments = set(a["user_id"] for a in assessments_result["data"])
+
+        # Enrich student data
+        enriched_students = []
+        for student in students:
+            enriched_students.append({
+                "id": student["id"],
+                "full_name": student["full_name"],
+                "email": student["email"],
+                "year_level": student.get("year_level", ""),
+                "has_assessment": student["id"] in students_with_assessments,
+                "subjects_count": 0  # TODO: Count from student_subjects table
+            })
+
+        return {"students": enriched_students}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
