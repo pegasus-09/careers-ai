@@ -2,6 +2,9 @@
 FastAPI application for LaunchPad School Career Guidance System
 Uses Supabase REST API (no pyroaring dependency)
 """
+import os
+from dotenv import load_dotenv
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
@@ -19,6 +22,7 @@ from inference.answer_converter import convert_answers_to_profile
 
 from datetime import datetime
 
+load_dotenv()
 app = FastAPI(title="LaunchPad Career Guidance API", version="2.0.0")
 
 # CORS configuration
@@ -46,6 +50,12 @@ class AssessmentResponse(BaseModel):
     profile_data: Dict
     message: str
 
+
+class AddStudentRequest(BaseModel):
+    email: str
+    password: str
+    full_name: str
+    year_level: str
 
 # ============================================================================
 # HEALTH CHECK
@@ -473,6 +483,69 @@ async def get_school_stats(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load stats: {str(e)}")
+
+
+@app.post("/admin/add-student")
+async def add_student(
+        request: AddStudentRequest,  # ← Changed to use Pydantic model
+        profile: Profile = Depends(require_admin)
+):
+    """Admin adds a new student to the school"""
+    try:
+        # Create auth user in Supabase
+        import httpx
+
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SECRET_KEY")
+
+        # Create user via Supabase Admin API
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{supabase_url}/auth/v1/admin/users",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "email": request.email,
+                    "password": request.password,
+                    "email_confirm": True
+                }
+            )
+
+            if response.status_code != 200:
+                error_detail = response.json()
+                raise HTTPException(status_code=400, detail=f"Failed to create user: {error_detail}")
+
+            user_data = response.json()
+            user_id = user_data["id"]
+
+        # Create profile
+        profile_data = {
+            "id": user_id,
+            "school_id": profile.school_id,
+            "role": UserRole.STUDENT,
+            "full_name": request.full_name,
+            "email": request.email,
+            "year_level": request.year_level
+        }
+
+        query = await supabase_client.query("profiles")
+        result = await query.insert(profile_data).execute()
+
+        if result.get("error"):
+            raise Exception(result["error"])
+
+        return {
+            "id": user_id,
+            "message": "Student added successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 # ============================================================================
 # RUN SERVER
