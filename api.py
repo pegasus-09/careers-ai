@@ -57,6 +57,24 @@ class AddStudentRequest(BaseModel):
     full_name: str
     year_level: str
 
+
+class AddTeacherRequest(BaseModel):
+    email: str
+    password: str
+    full_name: str
+
+
+class UpdateTeacherRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+
+
+class CreateClassRequest(BaseModel):
+    subject_id: str
+    teacher_id: str
+    year_level: str
+    class_name: str
+
 # ============================================================================
 # HEALTH CHECK
 # ============================================================================
@@ -381,8 +399,7 @@ async def get_all_students(
     try:
         # Get all students
         query = await supabase_client.query("profiles")
-        students_result = await query.select("*").eq("school_id", profile.school_id).eq("role",
-                                                                                        UserRole.STUDENT).execute()
+        students_result = await query.select("*").eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
 
         students = students_result["data"]
 
@@ -408,7 +425,7 @@ async def get_all_students(
                 "email": student["email"],
                 "year_level": student.get("year_level", ""),
                 "has_assessment": student["id"] in students_with_assessments,
-                "subjects_count": 0  # TODO: Count from student_subjects table
+                "subjects_count": 0  # TODO: Add later
             })
 
         return {"students": enriched_students}
@@ -546,6 +563,519 @@ async def add_student(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# ADMIN TEACHER ENDPOINTS
+# ============================================================================
+
+@app.get("/admin/teachers")
+async def get_all_teachers(
+        profile: Profile = Depends(require_admin)
+):
+    """Admin gets all teachers with their classes and subjects"""
+    try:
+        # Get all teachers
+        query = await supabase_client.query("profiles")
+        teachers_result = await query.select("*").eq("school_id", profile.school_id).eq("role",
+                                                                                        UserRole.TEACHER).execute()
+
+        teachers = teachers_result["data"]
+
+        if not teachers:
+            return {"teachers": []}
+
+        enriched_teachers = []
+
+        for teacher in teachers:
+            teacher_id = teacher["id"]
+
+            # Get classes taught by this teacher
+            query = await supabase_client.query("classes")
+            classes_result = await query.select("id, class_name, year_level, subject_id").eq("teacher_id",
+                                                                                             teacher_id).execute()
+
+            classes_taught = classes_result["data"]
+
+            # Get unique subject IDs
+            subject_ids = list(set([c["subject_id"] for c in classes_taught]))
+
+            # Get subject details
+            subjects_taught = []
+            if subject_ids:
+                query = await supabase_client.query("subjects")
+                subjects_result = await query.select("id, name, category").in_("id", subject_ids).execute()
+                subjects_taught = subjects_result["data"]
+
+            enriched_teachers.append({
+                "id": teacher["id"],
+                "full_name": teacher["full_name"],
+                "email": teacher["email"],
+                "classes_taught": classes_taught,
+                "subjects_taught": subjects_taught,
+                "classes_count": len(classes_taught),
+                "subjects_count": len(subjects_taught)
+            })
+
+        return {"teachers": enriched_teachers}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/admin/teacher/{teacher_id}")
+async def get_teacher_details(
+        teacher_id: str,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin gets detailed teacher information"""
+    try:
+        # Get teacher profile
+        query = await supabase_client.query("profiles")
+        teacher_result = await query.select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
+                                                                                                            UserRole.TEACHER).execute()
+
+        if not teacher_result["data"]:
+            raise HTTPException(status_code=404, detail="Teacher not found")
+
+        teacher = teacher_result["data"][0]
+
+        # Get classes taught
+        query = await supabase_client.query("classes")
+        classes_result = await query.select("*").eq("teacher_id", teacher_id).execute()
+
+        classes = classes_result["data"]
+
+        # Get subjects from classes
+        subject_ids = list(set([c["subject_id"] for c in classes]))
+
+        subjects = []
+        if subject_ids:
+            query = await supabase_client.query("subjects")
+            subjects_result = await query.select("*").in_("id", subject_ids).execute()
+            subjects = subjects_result["data"]
+
+        # Get students in teacher's classes
+        class_ids = [c["id"] for c in classes]
+
+        students = []
+        if class_ids:
+            query = await supabase_client.query("student_classes")
+            student_classes_result = await query.select("student_id, class_id").in_("class_id", class_ids).execute()
+
+            student_ids = list(set([sc["student_id"] for sc in student_classes_result["data"]]))
+
+            if student_ids:
+                query = await supabase_client.query("profiles")
+                students_result = await query.select("id, full_name, email, year_level").in_("id",
+                                                                                             student_ids).execute()
+                students = students_result["data"]
+
+        return {
+            "teacher": teacher,
+            "classes": classes,
+            "subjects": subjects,
+            "students": students
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/admin/teacher")
+async def add_teacher(
+        request: AddTeacherRequest,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin adds a new teacher to the school"""
+    try:
+        # Create auth user in Supabase
+        import httpx
+
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SECRET_KEY")
+
+        # Create user via Supabase Admin API
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{supabase_url}/auth/v1/admin/users",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "email": request.email,
+                    "password": request.password,
+                    "email_confirm": True
+                }
+            )
+
+            if response.status_code != 200:
+                error_detail = response.json()
+                raise HTTPException(status_code=400, detail=f"Failed to create user: {error_detail}")
+
+            user_data = response.json()
+            user_id = user_data["id"]
+
+        # Create profile
+        profile_data = {
+            "id": user_id,
+            "school_id": profile.school_id,
+            "role": UserRole.TEACHER,
+            "full_name": request.full_name,
+            "email": request.email
+        }
+
+        query = await supabase_client.query("profiles")
+        result = await query.insert(profile_data).execute()
+
+        if result.get("error"):
+            raise Exception(result["error"])
+
+        return {
+            "id": user_id,
+            "message": "Teacher added successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.put("/admin/teacher/{teacher_id}")
+async def update_teacher(
+        teacher_id: str,
+        request: UpdateTeacherRequest,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin updates teacher profile"""
+    try:
+        # Verify teacher exists and belongs to school
+        query = await supabase_client.query("profiles")
+        teacher_check = await query.select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
+                                                                                                           UserRole.TEACHER).execute()
+
+        if not teacher_check["data"]:
+            raise HTTPException(status_code=404, detail="Teacher not found")
+
+        # Build update data
+        update_data = {}
+        if request.full_name is not None:
+            update_data["full_name"] = request.full_name
+        if request.email is not None:
+            update_data["email"] = request.email
+
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        # Update profile
+        query = await supabase_client.query("profiles")
+        result = await query.update(update_data).eq("id", teacher_id).execute()
+
+        if result.get("error"):
+            raise Exception(result["error"])
+
+        return {"message": "Teacher updated successfully", "teacher": result["data"][0]}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.delete("/admin/teacher/{teacher_id}")
+async def delete_teacher(
+        teacher_id: str,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin deletes teacher (cascades to classes)"""
+    try:
+        # Verify teacher exists and belongs to school
+        query = await supabase_client.query("profiles")
+        teacher_check = await query.select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
+                                                                                                           UserRole.TEACHER).execute()
+
+        if not teacher_check["data"]:
+            raise HTTPException(status_code=404, detail="Teacher not found")
+
+        # Delete profile (cascades due to foreign keys)
+        query = await supabase_client.query("profiles")
+        result = await query.delete().eq("id", teacher_id).execute()
+
+        if result.get("error"):
+            raise Exception(result["error"])
+
+        # Delete from auth
+        import httpx
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SECRET_KEY")
+
+        async with httpx.AsyncClient() as client:
+            await client.delete(
+                f"{supabase_url}/auth/v1/admin/users/{teacher_id}",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                }
+            )
+
+        return {"message": "Teacher deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# ADMIN SUBJECT ENDPOINTS
+# ============================================================================
+
+@app.get("/admin/subjects")
+async def get_all_subjects(
+        profile: Profile = Depends(require_admin)
+):
+    """Admin gets all subjects in the school"""
+    try:
+        # Get all subjects
+        query = await supabase_client.query("subjects")
+        subjects_result = await query.select("*").eq("school_id", profile.school_id).execute()
+
+        subjects = subjects_result["data"]
+
+        if not subjects:
+            return {"subjects": []}
+
+        enriched_subjects = []
+
+        for subject in subjects:
+            subject_id = subject["id"]
+
+            # Count classes for this subject
+            query = await supabase_client.query("classes")
+            classes_result = await query.select("id").eq("subject_id", subject_id).execute()
+
+            classes_count = len(classes_result["data"])
+
+            enriched_subjects.append({
+                "id": subject["id"],
+                "name": subject["name"],
+                "category": subject.get("category", ""),
+                "year_level": subject.get("year_level", ""),
+                "classes_count": classes_count
+            })
+
+        return {"subjects": enriched_subjects}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# ADMIN CLASS ENDPOINTS
+# ============================================================================
+
+@app.get("/admin/classes")
+async def get_all_classes(
+        profile: Profile = Depends(require_admin)
+):
+    """Admin gets all classes in the school"""
+    try:
+        # Get all classes
+        query = await supabase_client.query("classes")
+        classes_result = await query.select("*").eq("school_id", profile.school_id).execute()
+
+        classes = classes_result["data"]
+
+        if not classes:
+            return {"classes": []}
+
+        enriched_classes = []
+
+        for cls in classes:
+            # Get subject
+            query = await supabase_client.query("subjects")
+            subject_result = await query.select("name, category").eq("id", cls["subject_id"]).execute()
+            subject = subject_result["data"][0] if subject_result["data"] else {}
+
+            # Get teacher
+            query = await supabase_client.query("profiles")
+            teacher_result = await query.select("full_name").eq("id", cls["teacher_id"]).execute()
+            teacher = teacher_result["data"][0] if teacher_result["data"] else {}
+
+            # Count students
+            query = await supabase_client.query("student_classes")
+            students_result = await query.select("student_id").eq("class_id", cls["id"]).execute()
+            student_count = len(students_result["data"])
+
+            enriched_classes.append({
+                "id": cls["id"],
+                "class_name": cls["class_name"],
+                "year_level": cls["year_level"],
+                "subject_name": subject.get("name", ""),
+                "subject_category": subject.get("category", ""),
+                "teacher_name": teacher.get("full_name", ""),
+                "teacher_id": cls["teacher_id"],
+                "subject_id": cls["subject_id"],
+                "student_count": student_count
+            })
+
+        return {"classes": enriched_classes}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/admin/class")
+async def create_class(
+        request: CreateClassRequest,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin creates a new class"""
+    try:
+        # Verify subject exists and belongs to school
+        query = await supabase_client.query("subjects")
+        subject_check = await query.select("*").eq("id", request.subject_id).eq("school_id",
+                                                                                profile.school_id).execute()
+
+        if not subject_check["data"]:
+            raise HTTPException(status_code=404, detail="Subject not found")
+
+        # Verify teacher exists and belongs to school
+        query = await supabase_client.query("profiles")
+        teacher_check = await query.select("*").eq("id", request.teacher_id).eq("school_id", profile.school_id).eq(
+            "role", UserRole.TEACHER).execute()
+
+        if not teacher_check["data"]:
+            raise HTTPException(status_code=404, detail="Teacher not found")
+
+        # Create class
+        class_data = {
+            "school_id": profile.school_id,
+            "subject_id": request.subject_id,
+            "teacher_id": request.teacher_id,
+            "year_level": request.year_level,
+            "class_name": request.class_name
+        }
+
+        query = await supabase_client.query("classes")
+        result = await query.insert(class_data).execute()
+
+        if result.get("error"):
+            raise Exception(result["error"])
+
+        return {
+            "id": result["data"][0]["id"],
+            "message": "Class created successfully",
+            "class": result["data"][0]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# ADMIN REPORTS ENDPOINT
+# ============================================================================
+
+@app.get("/admin/reports/summary")
+async def get_reports_summary(
+        profile: Profile = Depends(require_admin)
+):
+    """Get reports summary with top careers per student"""
+    try:
+        school_id = profile.school_id
+
+        # Get all classes in school
+        query = await supabase_client.query("classes")
+        classes_result = await query.select("*").eq("school_id", school_id).execute()
+
+        classes = classes_result["data"]
+
+        # Get all students with assessments
+        query = await supabase_client.query("assessment_results")
+        assessments_result = await query.select("user_id, ranking").eq("school_id", school_id).execute()
+
+        assessments_by_user = {a["user_id"]: a["ranking"] for a in assessments_result["data"]}
+
+        # Get all students
+        query = await supabase_client.query("profiles")
+        students_result = await query.select("id, full_name, email, year_level").eq("school_id", school_id).eq("role",
+                                                                                                               UserRole.STUDENT).execute()
+
+        students = students_result["data"]
+
+        # Enrich students with top career
+        enriched_students = []
+        for student in students:
+            student_id = student["id"]
+            ranking = assessments_by_user.get(student_id)
+
+            top_career = None
+            if ranking and len(ranking) > 0:
+                # ranking is [[soc_code, career_name, score], ...]
+                top_career = {
+                    "soc_code": ranking[0][0],
+                    "career_name": ranking[0][1],
+                    "score": ranking[0][2]
+                }
+
+            enriched_students.append({
+                "id": student_id,
+                "full_name": student["full_name"],
+                "email": student["email"],
+                "year_level": student.get("year_level", ""),
+                "top_career": top_career,
+                "has_assessment": ranking is not None
+            })
+
+        # Enrich classes with student count
+        enriched_classes = []
+        for cls in classes:
+            class_id = cls["id"]
+
+            # Count students in class
+            query = await supabase_client.query("student_classes")
+            student_classes_result = await query.select("student_id").eq("class_id", class_id).execute()
+
+            student_count = len(student_classes_result["data"])
+
+            # Get subject name
+            query = await supabase_client.query("subjects")
+            subject_result = await query.select("name, category").eq("id", cls["subject_id"]).execute()
+
+            subject = subject_result["data"][0] if subject_result["data"] else {}
+
+            # Get teacher name
+            query = await supabase_client.query("profiles")
+            teacher_result = await query.select("full_name").eq("id", cls["teacher_id"]).execute()
+
+            teacher = teacher_result["data"][0] if teacher_result["data"] else {}
+
+            enriched_classes.append({
+                "id": class_id,
+                "class_name": cls["class_name"],
+                "year_level": cls["year_level"],
+                "subject_name": subject.get("name", ""),
+                "subject_category": subject.get("category", ""),
+                "teacher_name": teacher.get("full_name", ""),
+                "student_count": student_count
+            })
+
+        return {
+            "classes": enriched_classes,
+            "students": enriched_students
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 
 # ============================================================================
 # RUN SERVER
