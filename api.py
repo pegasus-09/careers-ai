@@ -436,6 +436,44 @@ async def get_student_details(
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
+@app.get("/admin/stats")
+async def get_school_stats(
+        profile: Profile = Depends(require_admin)
+):
+    """Get school-wide statistics"""
+    try:
+        school_id = profile.school_id
+
+        # Count students
+        query = await supabase_client.query("profiles")
+        students_result = await query.select("id").eq("school_id", school_id).eq("role", UserRole.STUDENT).execute()
+        total_students = len(students_result.get("data", []))
+
+        # Count teachers
+        query = await supabase_client.query("profiles")
+        teachers_result = await query.select("id").eq("school_id", school_id).eq("role", UserRole.TEACHER).execute()
+        total_teachers = len(teachers_result.get("data", []))
+
+        # Count subjects
+        query = await supabase_client.query("subjects")
+        subjects_result = await query.select("id").eq("school_id", school_id).execute()
+        total_subjects = len(subjects_result.get("data", []))
+
+        # Count assessments completed
+        query = await supabase_client.query("assessment_results")
+        assessments_result = await query.select("user_id").eq("school_id", school_id).execute()
+        total_assessments = len(assessments_result.get("data", []))
+
+        return {
+            "total_students": total_students,
+            "total_teachers": total_teachers,
+            "total_subjects": total_subjects,
+            "completed_assessments": total_assessments
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load stats: {str(e)}")
+
 # ============================================================================
 # RUN SERVER
 # ============================================================================
