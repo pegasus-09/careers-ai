@@ -125,6 +125,7 @@ class QueryBuilder:
         self.method = "POST"
         self.body = data
         self.on_conflict = on_conflict
+        self.params["on_conflict"] = on_conflict
         return self
 
     def update(self, data: Dict) -> 'QueryBuilder':
