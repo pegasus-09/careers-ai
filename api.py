@@ -69,6 +69,12 @@ class UpdateTeacherRequest(BaseModel):
     email: Optional[str] = None
 
 
+class UpdateStudentRequest(BaseModel):
+    full_name: Optional[str] = None
+    year_level: Optional[str] = None
+    class_id: Optional[str] = None
+
+
 class CreateClassRequest(BaseModel):
     subject_id: str
     teacher_id: str
@@ -416,6 +422,23 @@ async def get_all_students(
         # Create set of student IDs who have assessments
         students_with_assessments = set(a["user_id"] for a in assessments_result["data"])
 
+        # Get classes for students (one class per student)
+        query = await supabase_client.query("student_classes")
+        student_classes_result = await query.select("student_id, class_id").in_("student_id", student_ids).execute()
+
+        class_by_student = {}
+        class_ids = []
+        for sc in student_classes_result["data"]:
+            if sc["student_id"] not in class_by_student:
+                class_by_student[sc["student_id"]] = sc["class_id"]
+                class_ids.append(sc["class_id"])
+
+        class_name_by_id = {}
+        if class_ids:
+            query = await supabase_client.query("classes")
+            classes_result = await query.select("id, class_name").in_("id", list(set(class_ids))).execute()
+            class_name_by_id = {c["id"]: c.get("class_name", "") for c in classes_result["data"]}
+
         # Enrich student data
         enriched_students = []
         for student in students:
@@ -424,6 +447,8 @@ async def get_all_students(
                 "full_name": student["full_name"],
                 "email": student["email"],
                 "year_level": student.get("year_level", ""),
+                "class_id": class_by_student.get(student["id"]),
+                "class_name": class_name_by_id.get(class_by_student.get(student["id"]), ""),
                 "has_assessment": student["id"] in students_with_assessments,
                 "subjects_count": 0  # TODO: Add later
             })
@@ -453,10 +478,146 @@ async def get_student_details(
         query = await supabase_client.query("assessment_results")
         assessment_result = await query.select("*").eq("user_id", student_id).execute()
 
+        # Get classes
+        query = await supabase_client.query("student_classes")
+        student_classes_result = await query.select("class_id").eq("student_id", student_id).execute()
+        class_ids = [c["class_id"] for c in student_classes_result["data"]]
+
+        classes = []
+        subjects = []
+        if class_ids:
+            query = await supabase_client.query("classes")
+            classes_result = await query.select("id, class_name, year_level, subject_id").in_("id", class_ids).execute()
+            classes = classes_result["data"]
+
+            subject_ids = list(set([c.get("subject_id") for c in classes if c.get("subject_id")]))
+            if subject_ids:
+                query = await supabase_client.query("subjects")
+                subjects_result = await query.select("id, name, category").in_("id", subject_ids).execute()
+                subjects = subjects_result["data"]
+
+        class_id = class_ids[0] if class_ids else None
+        class_name_by_id = {c["id"]: c.get("class_name", "") for c in classes}
+        student["class_id"] = class_id
+        student["class_name"] = class_name_by_id.get(class_id, "")
+
+        # Get comments
+        query = await supabase_client.query("teacher_comments")
+        comments_result = await query.select("*").eq("student_id", student_id).execute()
+        comments = comments_result["data"]
+
+        teacher_ids = list(set([c.get("teacher_id") for c in comments if c.get("teacher_id")]))
+        teacher_name_by_id = {}
+        if teacher_ids:
+            query = await supabase_client.query("profiles")
+            teachers_result = await query.select("id, full_name").in_("id", teacher_ids).execute()
+            teacher_name_by_id = {t["id"]: t.get("full_name", "") for t in teachers_result["data"]}
+
+        for c in comments:
+            c["teacher_name"] = teacher_name_by_id.get(c.get("teacher_id"))
+            c["class_name"] = class_name_by_id.get(c.get("class_id"))
+
         return {
             "profile": student,
-            "assessment": assessment_result["data"][0] if assessment_result["data"] else None
+            "assessment": assessment_result["data"][0] if assessment_result["data"] else None,
+            "classes": classes,
+            "subjects": subjects,
+            "comments": comments
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.put("/admin/student/{student_id}")
+async def update_student(
+        student_id: str,
+        request: UpdateStudentRequest,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin updates student profile (name/year/class)"""
+    try:
+        # Verify student exists and belongs to school
+        query = await supabase_client.query("profiles")
+        student_check = await query.select("*").eq("id", student_id).eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
+
+        if not student_check["data"]:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        update_data = {}
+        if request.full_name is not None:
+            update_data["full_name"] = request.full_name
+        if request.year_level is not None:
+            update_data["year_level"] = request.year_level
+
+        if update_data:
+            query = await supabase_client.query("profiles")
+            result = await query.update(update_data).eq("id", student_id).execute()
+            if result.get("error"):
+                raise Exception(result["error"])
+
+        # Update class assignment (one class per student)
+        if request.class_id is not None:
+            class_id = request.class_id or None
+            if class_id:
+                query = await supabase_client.query("classes")
+                class_check = await query.select("id").eq("id", class_id).eq("school_id", profile.school_id).execute()
+                if not class_check["data"]:
+                    raise HTTPException(status_code=404, detail="Class not found")
+
+            query = await supabase_client.query("student_classes")
+            await query.delete().eq("student_id", student_id).execute()
+
+            if class_id:
+                insert_result = await query.insert({"student_id": student_id, "class_id": class_id}).execute()
+                if insert_result.get("error"):
+                    raise Exception(insert_result["error"])
+
+        return {"message": "Student updated successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.delete("/admin/student/{student_id}")
+async def delete_student(
+        student_id: str,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin deletes student (cascades to related records)"""
+    try:
+        # Verify student exists and belongs to school
+        query = await supabase_client.query("profiles")
+        student_check = await query.select("*").eq("id", student_id).eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
+
+        if not student_check["data"]:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        # Delete profile (cascades due to foreign keys)
+        query = await supabase_client.query("profiles")
+        result = await query.delete().eq("id", student_id).execute()
+        if result.get("error"):
+            raise Exception(result["error"])
+
+        # Delete from auth
+        import httpx
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SECRET_KEY")
+
+        async with httpx.AsyncClient() as client:
+            await client.delete(
+                f"{supabase_url}/auth/v1/admin/users/{student_id}",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                }
+            )
+
+        return {"message": "Student deleted successfully"}
+
     except HTTPException:
         raise
     except Exception as e:
