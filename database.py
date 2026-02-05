@@ -51,7 +51,7 @@ class Profile(BaseModel):
 async def get_user_profile(user_id: str) -> Optional[Profile]:
     """Get user profile from database"""
     try:
-        query = await supabase_client.query("profiles")
+        query = supabase_client.query("profiles")
         result = await query.select("*").eq("id", user_id).execute()
 
         if result["data"] and len(result["data"]) > 0:

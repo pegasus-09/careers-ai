@@ -21,6 +21,7 @@ from scripts.rank_all_careers import rank_profiles
 from inference.answer_converter import convert_answers_to_profile
 
 from datetime import datetime
+import time
 
 load_dotenv()
 app = FastAPI(title="LaunchPad Career Guidance API", version="2.0.0")
@@ -94,6 +95,40 @@ class UpdateClassRequest(BaseModel):
     student_ids: Optional[List[str]] = None
 
 
+class AddCommentRequest(BaseModel):
+    student_id: str
+    class_id: str
+    comment_text: str
+    performance_rating: Optional[int] = None
+    engagement_rating: Optional[int] = None
+
+
+class CommentResponse(BaseModel):
+    id: str
+    student_id: str
+    teacher_id: str
+    class_id: str
+    comment_text: str
+    performance_rating: Optional[int] = None
+    engagement_rating: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+# Teacher-specific models for student details
+class ClassDetail(BaseModel):
+    id: str
+    class_name: str
+    subject_name: str
+
+class StudentDetailResponse(BaseModel):
+    id: str
+    full_name: str
+    email: str
+    year_level: str
+    classes: List[ClassDetail]
+
+
 HARD_CODED_SUBJECTS = [
     {"name": "English", "category": "Humanities"},
     {"name": "Maths", "category": "STEM"},
@@ -123,13 +158,11 @@ async def ensure_hardcoded_subjects(school_id: str):
         for subject in HARD_CODED_SUBJECTS
     ]
 
-    query = await supabase_client.query("subjects")
-    insert_result = await query.upsert(seed_rows, on_conflict="school_id,name,category").execute()
+    insert_result = await supabase_client.query("subjects").upsert(seed_rows, on_conflict="school_id,name,category").execute()
     if insert_result.get("error"):
         raise Exception(insert_result["error"])
 
-    query = await supabase_client.query("subjects")
-    subjects_result = await query.select("id, name, category").eq("school_id", school_id).execute()
+    subjects_result = await supabase_client.query("subjects").select("id, name, category").eq("school_id", school_id).execute()
 
     existing_subjects = subjects_result["data"] or []
     existing_by_name = {}
@@ -306,29 +339,23 @@ async def get_student_profile_data(
     """Get complete student profile"""
     try:
         # Get assessment
-        query = await supabase_client.query("assessment_results")
-        assessment_result = await query.select("*").eq("user_id", profile.id).execute()
+        assessment_result = await supabase_client.query("assessment_results").select("*").eq("user_id", profile.id).execute()
         assessment = assessment_result["data"][0] if assessment_result["data"] else None
 
         # Get classes
-        query = await supabase_client.query("student_classes")
-        classes_result = await query.select("*").eq("student_id", profile.id).execute()
+        classes_result = await supabase_client.query("student_classes").select("*").eq("student_id", profile.id).execute()
 
         # Get comments
-        query = await supabase_client.query("teacher_comments")
-        comments_result = await query.select("*").eq("student_id", profile.id).execute()
+        comments_result = await supabase_client.query("teacher_comments").select("*").eq("student_id", profile.id).execute()
 
         # Get attributes
-        query = await supabase_client.query("student_attributes")
-        attributes_result = await query.select("*").eq("student_id", profile.id).execute()
+        attributes_result = await supabase_client.query("student_attributes").select("*").eq("student_id", profile.id).execute()
 
         # Get experiences
-        query = await supabase_client.query("work_experiences")
-        experiences_result = await query.select("*").eq("student_id", profile.id).execute()
+        experiences_result = await supabase_client.query("work_experiences").select("*").eq("student_id", profile.id).execute()
 
         # Get projects
-        query = await supabase_client.query("projects")
-        projects_result = await query.select("*").eq("student_id", profile.id).execute()
+        projects_result = await supabase_client.query("projects").select("*").eq("student_id", profile.id).execute()
 
         return {
             "profile": {
@@ -369,8 +396,7 @@ async def add_work_experience(
             "added_by": profile.id
         }
 
-        query = await supabase_client.query("work_experiences")
-        result = await query.insert(data).execute()
+        result = await supabase_client.query("work_experiences").insert(data).execute()
 
         if result["error"]:
             raise Exception(result["error"])
@@ -384,72 +410,241 @@ async def add_work_experience(
 # TEACHER ENDPOINTS
 # ============================================================================
 
+
 @app.get("/teacher/students")
-async def get_teacher_students(
-        profile: Profile = Depends(require_teacher)
-):
-    """Get all students in teacher's classes"""
+async def get_teacher_students(profile: Profile = Depends(require_teacher)):
+    """Teacher gets all students they teach"""
     try:
-        # Get teacher's classes
-        query = await supabase_client.query("classes")
-        classes_result = await query.select("id").eq("teacher_id", profile.id).execute()
+        # Get classes for this teacher
+        classes_result = (
+            await supabase_client.query("classes")
+            .select("id")
+            .eq("teacher_id", profile.id)
+            .execute()
+        )
 
         class_ids = [c["id"] for c in classes_result["data"]]
 
         if not class_ids:
-            return []
+            return {"students": []}
 
         # Get students in those classes
-        query = await supabase_client.query("student_classes")
-        students_result = await query.select("student_id").in_("class_id", class_ids).execute()
+        students_result = (
+            await supabase_client.query("student_classes")
+            .select("student_id")
+            .in_("class_id", class_ids)
+            .execute()
+        )
 
         student_ids = list(set([s["student_id"] for s in students_result["data"]]))
 
+        if not student_ids:
+            return {"students": []}
+
         # Get student profiles
-        query = await supabase_client.query("profiles")
-        profiles_result = await query.select("*").in_("id", student_ids).execute()
+        profiles_result = (
+            await supabase_client.query("profiles")
+            .select("*")
+            .in_("id", student_ids)
+            .execute()
+        )
 
         return {"students": profiles_result["data"]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
-@app.post("/teacher/comment")
-async def add_teacher_comment(
-        student_id: str,
-        class_id: str,
-        comment_text: str,
-        performance_rating: Optional[int] = None,
-        engagement_rating: Optional[int] = None,
-        profile: Profile = Depends(require_teacher)
+@app.get("/teacher/student/{student_id}", response_model=StudentDetailResponse)
+async def get_teacher_student_detail(
+    student_id: str,
+    profile: Profile = Depends(require_teacher)
 ):
-    """Teacher adds comment for student"""
+    """Teacher gets detailed student information for a student assigned to their class."""
+    print(f"\n[DEBUG] Teacher {profile.id} trying to access student {student_id}")
     try:
-        # Verify teacher teaches this class
-        query = await supabase_client.query("classes")
-        class_check = await query.select("*").eq("id", class_id).eq("teacher_id", profile.id).execute()
+        # Verify student exists and belongs to the same school
+        print("[DEBUG] 1. Fetching student profile...")
+        student_profile_result = await supabase_client.query("profiles").select("*") \
+            .eq("id", student_id) \
+            .eq("school_id", profile.school_id) \
+            .execute()
+        print(f"[DEBUG]    ... Student profile result: {student_profile_result}")
 
-        if not class_check["data"]:
-            raise HTTPException(status_code=403, detail="You don't teach this class")
+        if not student_profile_result.get("data"):
+            print("[DEBUG]    ... Student not found in school. Raising 404.")
+            raise HTTPException(status_code=404, detail="Student not found or not in your school.")
 
-        # Insert comment
-        data = {
-            "student_id": student_id,
-            "teacher_id": profile.id,
-            "class_id": class_id,
-            "comment_text": comment_text,
-            "performance_rating": performance_rating,
-            "engagement_rating": engagement_rating
-        }
+        student_profile = student_profile_result["data"][0]
+        print(f"[DEBUG]    ... Found student: {student_profile.get('full_name')}")
 
-        query = await supabase_client.query("teacher_comments")
-        result = await query.insert(data).execute()
 
-        return {"id": result["data"][0]["id"], "message": "Comment added"}
+        if student_profile.get("role") != UserRole.STUDENT:
+            print(f"[DEBUG]    ... User {student_id} is not a student. Raising 400.")
+            raise HTTPException(status_code=400, detail="Provided ID does not belong to a student.")
+
+        # Get classes that the student is part of AND that are taught by the current teacher
+        # This is a bit complex as we need to join across student_classes, classes, and subjects
+
+        # 1. Get all class_ids the student is enrolled in
+        print("[DEBUG] 2. Fetching student's class enrollments...")
+        student_classes_response = await supabase_client.query("student_classes").select("class_id") \
+            .eq("student_id", student_id) \
+            .execute()
+        student_class_ids = [cls["class_id"] for cls in student_classes_response["data"]]
+        print(f"[DEBUG]    ... Student is in class IDs: {student_class_ids}")
+
+
+        if not student_class_ids:
+            # Student is not in any classes, so definitely not in current teacher's classes.
+            # This is not a 404 for the student, but a 403 for the teacher trying to access.
+            print("[DEBUG]    ... Student is not in any classes. Raising 403.")
+            raise HTTPException(status_code=403, detail="Student is not assigned to any of your classes.")
+
+        # 2. Get details for these classes, filtering by the current teacher and joining with subjects
+        print(f"[DEBUG] 3. Checking which of these classes are taught by teacher {profile.id}...")
+        teacher_student_classes_result = await supabase_client.query("classes") \
+            .select("id, class_name, subjects(name)") \
+            .in_("id", student_class_ids) \
+            .eq("teacher_id", profile.id) \
+            .execute()
+
+        teacher_student_classes_data = teacher_student_classes_result["data"]
+        print(f"[DEBUG]    ... Teacher's classes for this student: {teacher_student_classes_data}")
+
+
+        if not teacher_student_classes_data:
+            print(f"[DEBUG]    ... Teacher does not teach any of the student's classes. Raising 403.")
+            raise HTTPException(status_code=403, detail="Student is not assigned to any of your classes.")
+
+        # Format classes for the response model
+        formatted_classes: List[ClassDetail] = []
+        for cls in teacher_student_classes_data:
+            formatted_classes.append(ClassDetail(
+                id=cls["id"],
+                class_name=cls["class_name"],
+                subject_name=cls["subjects"]["name"]  # Access nested subject name
+            ))
+
+        print("[DEBUG] 4. Successfully found student and classes. Returning data.")
+        return StudentDetailResponse(
+            id=student_profile["id"],
+            full_name=student_profile["full_name"],
+            email=student_profile["email"],
+            year_level=student_profile["year_level"],
+            classes=formatted_classes
+        )
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        import traceback
+        print(f"[ERROR] An unexpected error occurred: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error fetching student details: {str(e)}")
+
+
+@app.post("/teacher/comment")
+async def add_teacher_comment(
+        request: AddCommentRequest,
+        profile: Profile = Depends(require_teacher)
+):
+    """Teacher adds or updates a comment for a student in a specific class."""
+    try:
+        # Verify teacher teaches this class
+        class_check = await supabase_client.query("classes").select("id").eq("id", request.class_id).eq("teacher_id", profile.id).execute()
+        if not class_check.get("data"):
+            raise HTTPException(status_code=403, detail="You do not teach this class.")
+
+        # Check for existing comment
+        existing_comment_result = await supabase_client.query("teacher_comments").select("id") \
+            .eq("teacher_id", profile.id) \
+            .eq("student_id", request.student_id) \
+            .eq("class_id", request.class_id) \
+            .execute()
+
+        comment_data = {
+            "student_id": request.student_id,
+            "teacher_id": profile.id,
+            "class_id": request.class_id,
+            "comment_text": request.comment_text,
+            "performance_rating": request.performance_rating,
+            "engagement_rating": request.engagement_rating,
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+        if existing_comment_result.get("data"):
+            # UPDATE existing comment
+            comment_id = existing_comment_result["data"][0]["id"]
+            result = await supabase_client.query("teacher_comments").update(comment_data).eq("id", comment_id).execute()
+            message = "Comment updated successfully"
+        else:
+            # INSERT new comment
+            result = await supabase_client.query("teacher_comments").insert(comment_data).execute()
+            message = "Comment added successfully"
+
+        if not result.get("data"):
+             raise HTTPException(status_code=500, detail="Failed to save comment")
+
+        return {"id": result["data"][0]["id"], "message": message}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving comment: {str(e)}")
+
+
+@app.get("/teacher/student/{student_id}/class/{class_id}/comment", response_model=Optional[CommentResponse])
+async def get_teacher_comment(
+    student_id: str,
+    class_id: str,
+    profile: Profile = Depends(require_teacher)
+):
+    """Teacher gets their comment for a student in a specific class."""
+    try:
+        comment_result = await supabase_client.query("teacher_comments").select("*") \
+            .eq("teacher_id", profile.id) \
+            .eq("student_id", student_id) \
+            .eq("class_id", class_id) \
+            .execute()
+
+        if comment_result.get("data"):
+            return comment_result["data"][0]
+        return None
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching comment: {str(e)}")
+
+
+@app.delete("/teacher/student/{student_id}/class/{class_id}/comment")
+async def delete_teacher_comment(
+    student_id: str,
+    class_id: str,
+    profile: Profile = Depends(require_teacher)
+):
+    """Teacher deletes their comment for a student in a specific class."""
+    try:
+        # First, find the comment to ensure it belongs to the teacher
+        comment_result = await supabase_client.query("teacher_comments").select("id") \
+            .eq("teacher_id", profile.id) \
+            .eq("student_id", student_id) \
+            .eq("class_id", class_id) \
+            .execute()
+
+        if not comment_result.get("data"):
+            raise HTTPException(status_code=404, detail="Comment not found.")
+
+        comment_id = comment_result["data"][0]["id"]
+
+        delete_result = await supabase_client.query("teacher_comments").delete().eq("id", comment_id).execute()
+
+        # The delete operation in this client might not return data on success,
+        # so check for error instead of data.
+        if delete_result.get("error"):
+            raise HTTPException(status_code=500, detail=f"Failed to delete comment: {delete_result['error']}")
+
+        return {"message": "Comment deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting comment: {str(e)}")
 
 
 # ============================================================================
@@ -461,52 +656,47 @@ async def get_all_students(
         profile: Profile = Depends(require_admin)
 ):
     """Admin gets all students in school"""
+    start_time = time.time()
     try:
-        # Get all students
-        query = await supabase_client.query("profiles")
-        students_result = await query.select("*").eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
+        # 1. Get all students for the school
+        students_result = await supabase_client.query("profiles") \
+            .select("id, full_name, email, year_level") \
+            .eq("school_id", profile.school_id) \
+            .eq("role", UserRole.STUDENT) \
+            .execute()
 
-        students = students_result["data"]
-
+        students = students_result.get("data", [])
         if not students:
             return {"students": []}
 
-        # Get all student IDs
         student_ids = [s["id"] for s in students]
 
-        # Get all assessments for these students in one query
-        query = await supabase_client.query("assessment_results")
-        assessments_result = await query.select("user_id").in_("user_id", student_ids).execute()
+        # 2. Get all related data in batches
+        assessments_result = await supabase_client.query("assessment_results").select("user_id").in_("user_id", student_ids).execute()
+        student_classes_result = await supabase_client.query("student_classes").select("student_id, class_id").in_("student_id", student_ids).execute()
+        comments_result = await supabase_client.query("teacher_comments").select("student_id").in_("student_id", student_ids).execute()
 
-        # Create set of student IDs who have assessments
-        students_with_assessments = set(a["user_id"] for a in assessments_result["data"])
-
-        # Get classes for students (multi-class)
-        query = await supabase_client.query("student_classes")
-        student_classes_result = await query.select("student_id, class_id").in_("student_id", student_ids).execute()
+        # 3. Process into lookup maps
+        students_with_assessments = {a["user_id"] for a in assessments_result.get("data", [])}
+        students_with_teacher_comments = {c["student_id"] for c in comments_result.get("data", [])}
 
         class_ids_by_student = {}
-        class_ids = []
-        for sc in student_classes_result["data"]:
+        all_class_ids = set()
+        for sc in student_classes_result.get("data", []):
             class_ids_by_student.setdefault(sc["student_id"], []).append(sc["class_id"])
-            class_ids.append(sc["class_id"])
+            all_class_ids.add(sc["class_id"])
 
         class_name_by_id = {}
-        if class_ids:
-            query = await supabase_client.query("classes")
-            classes_result = await query.select("id, class_name").in_("id", list(set(class_ids))).execute()
-            class_name_by_id = {c["id"]: c.get("class_name", "") for c in classes_result["data"]}
+        if all_class_ids:
+            classes_result = await supabase_client.query("classes").select("id, class_name").in_("id", list(all_class_ids)).execute()
+            class_name_by_id = {c["id"]: c.get("class_name", "") for c in classes_result.get("data", [])}
 
-        # Get teacher comments (report availability)
-        query = await supabase_client.query("teacher_comments")
-        comments_result = await query.select("student_id").in_("student_id", student_ids).execute()
-        students_with_teacher_comments = set(c["student_id"] for c in comments_result["data"])
-
-        # Enrich student data
+        # 4. Enrich student data
         enriched_students = []
         for student in students:
             student_class_ids = class_ids_by_student.get(student["id"], [])
             student_class_names = [class_name_by_id.get(class_id, "") for class_id in student_class_ids]
+
             enriched_students.append({
                 "id": student["id"],
                 "full_name": student["full_name"],
@@ -514,16 +704,16 @@ async def get_all_students(
                 "year_level": student.get("year_level", ""),
                 "class_ids": student_class_ids,
                 "class_names": student_class_names,
-                "class_id": student_class_ids[0] if student_class_ids else None,
-                "class_name": student_class_names[0] if student_class_names else "",
                 "has_assessment": student["id"] in students_with_assessments,
                 "has_teacher_comment": student["id"] in students_with_teacher_comments,
-                "subjects_count": 0  # TODO: Add later
             })
 
         return {"students": enriched_students}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        end_time = time.time()
+        print(f"PERF: get_all_students took {end_time - start_time:.4f} seconds.")
 
 
 @app.get("/admin/student/{student_id}")
@@ -534,8 +724,7 @@ async def get_student_details(
     """Admin gets detailed student information"""
     try:
         # Get student profile
-        query = await supabase_client.query("profiles")
-        student_result = await query.select("*").eq("id", student_id).eq("school_id", profile.school_id).execute()
+        student_result = await supabase_client.query("profiles").select("*").eq("id", student_id).eq("school_id", profile.school_id).execute()
 
         if not student_result["data"]:
             raise HTTPException(status_code=404, detail="Student not found")
@@ -543,25 +732,21 @@ async def get_student_details(
         student = student_result["data"][0]
 
         # Get assessment
-        query = await supabase_client.query("assessment_results")
-        assessment_result = await query.select("*").eq("user_id", student_id).execute()
+        assessment_result = await supabase_client.query("assessment_results").select("*").eq("user_id", student_id).execute()
 
         # Get classes
-        query = await supabase_client.query("student_classes")
-        student_classes_result = await query.select("class_id").eq("student_id", student_id).execute()
+        student_classes_result = await supabase_client.query("student_classes").select("class_id").eq("student_id", student_id).execute()
         class_ids = [c["class_id"] for c in student_classes_result["data"]]
 
         classes = []
         subjects = []
         if class_ids:
-            query = await supabase_client.query("classes")
-            classes_result = await query.select("id, class_name, year_level, subject_id").in_("id", class_ids).execute()
+            classes_result = await supabase_client.query("classes").select("id, class_name, year_level, subject_id").in_("id", class_ids).execute()
             classes = classes_result["data"]
 
             subject_ids = list(set([c.get("subject_id") for c in classes if c.get("subject_id")]))
             if subject_ids:
-                query = await supabase_client.query("subjects")
-                subjects_result = await query.select("id, name, category").in_("id", subject_ids).execute()
+                subjects_result = await supabase_client.query("subjects").select("id, name, category").in_("id", subject_ids).execute()
                 subjects = subjects_result["data"]
 
         class_name_by_id = {c["id"]: c.get("class_name", "") for c in classes}
@@ -571,15 +756,13 @@ async def get_student_details(
         student["class_name"] = class_name_by_id.get(student["class_id"], "")
 
         # Get comments
-        query = await supabase_client.query("teacher_comments")
-        comments_result = await query.select("*").eq("student_id", student_id).execute()
+        comments_result = await supabase_client.query("teacher_comments").select("*").eq("student_id", student_id).execute()
         comments = comments_result["data"]
 
         teacher_ids = list(set([c.get("teacher_id") for c in comments if c.get("teacher_id")]))
         teacher_name_by_id = {}
         if teacher_ids:
-            query = await supabase_client.query("profiles")
-            teachers_result = await query.select("id, full_name").in_("id", teacher_ids).execute()
+            teachers_result = await supabase_client.query("profiles").select("id, full_name").in_("id", teacher_ids).execute()
             teacher_name_by_id = {t["id"]: t.get("full_name", "") for t in teachers_result["data"]}
 
         for c in comments:
@@ -608,8 +791,7 @@ async def update_student(
     """Admin updates student profile (name/year/class)"""
     try:
         # Verify student exists and belongs to school
-        query = await supabase_client.query("profiles")
-        student_check = await query.select("*").eq("id", student_id).eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
+        student_check = await supabase_client.query("profiles").select("*").eq("id", student_id).eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
 
         if not student_check["data"]:
             raise HTTPException(status_code=404, detail="Student not found")
@@ -624,8 +806,7 @@ async def update_student(
             update_data["year_level"] = request.year_level
 
         if update_data:
-            query = await supabase_client.query("profiles")
-            result = await query.update(update_data).eq("id", student_id).execute()
+            result = await supabase_client.query("profiles").update(update_data).eq("id", student_id).execute()
             if result.get("error"):
                 raise Exception(result["error"])
 
@@ -635,8 +816,7 @@ async def update_student(
             unique_class_ids = list(dict.fromkeys(class_ids))
 
             if unique_class_ids:
-                query = await supabase_client.query("classes")
-                classes_result = await query.select("id, year_level").in_("id", unique_class_ids).eq(
+                classes_result = await supabase_client.query("classes").select("id, year_level").in_("id", unique_class_ids).eq(
                     "school_id", profile.school_id
                 ).execute()
 
@@ -652,13 +832,11 @@ async def update_student(
                     raise HTTPException(status_code=400,
                                         detail="All classes must match the student's year level")
 
-            query = await supabase_client.query("student_classes")
-            await query.delete().eq("student_id", student_id).execute()
+            await supabase_client.query("student_classes").delete().eq("student_id", student_id).execute()
 
             if unique_class_ids:
                 insert_rows = [{"student_id": student_id, "class_id": class_id} for class_id in unique_class_ids]
-                query = await supabase_client.query("student_classes")
-                insert_result = await query.insert(insert_rows).execute()
+                insert_result = await supabase_client.query("student_classes").insert(insert_rows).execute()
                 if insert_result.get("error"):
                     raise Exception(insert_result["error"])
 
@@ -666,31 +844,27 @@ async def update_student(
         elif request.class_id is not None:
             class_id = request.class_id or None
             if class_id:
-                query = await supabase_client.query("classes")
-                class_check = await query.select("id, year_level").eq("id", class_id).eq("school_id", profile.school_id).execute()
+                class_check = await supabase_client.query("classes").select("id, year_level").eq("id", class_id).eq("school_id", profile.school_id).execute()
                 if not class_check["data"]:
                     raise HTTPException(status_code=404, detail="Class not found")
                 class_year_level = class_check["data"][0].get("year_level")
                 if not class_year_level or class_year_level != effective_year_level:
                     raise HTTPException(status_code=400, detail="Class year level must match the student's year level")
 
-            query = await supabase_client.query("student_classes")
-            await query.delete().eq("student_id", student_id).execute()
+            await supabase_client.query("student_classes").delete().eq("student_id", student_id).execute()
 
             if class_id:
-                insert_result = await query.insert({"student_id": student_id, "class_id": class_id}).execute()
+                insert_result = await supabase_client.query("student_classes").insert({"student_id": student_id, "class_id": class_id}).execute()
                 if insert_result.get("error"):
                     raise Exception(insert_result["error"])
 
         # Validate existing assignments when only year level changes
         elif request.year_level is not None:
-            query = await supabase_client.query("student_classes")
-            student_classes_result = await query.select("class_id").eq("student_id", student_id).execute()
+            student_classes_result = await supabase_client.query("student_classes").select("class_id").eq("student_id", student_id).execute()
             existing_class_ids = [row["class_id"] for row in student_classes_result["data"]]
 
             if existing_class_ids:
-                query = await supabase_client.query("classes")
-                classes_result = await query.select("id, year_level").in_("id", existing_class_ids).execute()
+                classes_result = await supabase_client.query("classes").select("id, year_level").in_("id", existing_class_ids).execute()
                 mismatched = [
                     c for c in classes_result["data"]
                     if not c.get("year_level") or c.get("year_level") != effective_year_level
@@ -715,15 +889,13 @@ async def delete_student(
     """Admin deletes student (cascades to related records)"""
     try:
         # Verify student exists and belongs to school
-        query = await supabase_client.query("profiles")
-        student_check = await query.select("*").eq("id", student_id).eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
+        student_check = await supabase_client.query("profiles").select("*").eq("id", student_id).eq("school_id", profile.school_id).eq("role", UserRole.STUDENT).execute()
 
         if not student_check["data"]:
             raise HTTPException(status_code=404, detail="Student not found")
 
         # Delete profile (cascades due to foreign keys)
-        query = await supabase_client.query("profiles")
-        result = await query.delete().eq("id", student_id).execute()
+        result = await supabase_client.query("profiles").delete().eq("id", student_id).execute()
         if result.get("error"):
             raise Exception(result["error"])
 
@@ -758,23 +930,19 @@ async def get_school_stats(
         school_id = profile.school_id
 
         # Count students
-        query = await supabase_client.query("profiles")
-        students_result = await query.select("id").eq("school_id", school_id).eq("role", UserRole.STUDENT).execute()
+        students_result = await supabase_client.query("profiles").select("id").eq("school_id", school_id).eq("role", UserRole.STUDENT).execute()
         total_students = len(students_result.get("data", []))
 
         # Count teachers
-        query = await supabase_client.query("profiles")
-        teachers_result = await query.select("id").eq("school_id", school_id).eq("role", UserRole.TEACHER).execute()
+        teachers_result = await supabase_client.query("profiles").select("id").eq("school_id", school_id).eq("role", UserRole.TEACHER).execute()
         total_teachers = len(teachers_result.get("data", []))
 
         # Count classes
-        query = await supabase_client.query("classes")
-        classes_result = await query.select("id").eq("school_id", school_id).execute()
+        classes_result = await supabase_client.query("classes").select("id").eq("school_id", school_id).execute()
         total_classes = len(classes_result.get("data", []))
 
         # Count assessments completed
-        query = await supabase_client.query("assessment_results")
-        assessments_result = await query.select("user_id").eq("school_id", school_id).execute()
+        assessments_result = await supabase_client.query("assessment_results").select("user_id").eq("school_id", school_id).execute()
         total_assessments = len(assessments_result.get("data", []))
 
         return {
@@ -834,8 +1002,7 @@ async def add_student(
             "year_level": request.year_level
         }
 
-        query = await supabase_client.query("profiles")
-        result = await query.insert(profile_data).execute()
+        result = await supabase_client.query("profiles").insert(profile_data).execute()
 
         if result.get("error"):
             raise Exception(result["error"])
@@ -860,53 +1027,68 @@ async def get_all_teachers(
         profile: Profile = Depends(require_admin)
 ):
     """Admin gets all teachers with their classes and subjects"""
+    start_time = time.time()
     try:
-        # Get all teachers
-        query = await supabase_client.query("profiles")
-        teachers_result = await query.select("*").eq("school_id", profile.school_id).eq("role",
-                                                                                        UserRole.TEACHER).execute()
+        # 1. Get all teachers for the school
+        teachers_result = await supabase_client.query("profiles") \
+            .select("id, full_name, email") \
+            .eq("school_id", profile.school_id) \
+            .eq("role", UserRole.TEACHER) \
+            .execute()
 
-        teachers = teachers_result["data"]
-
+        teachers = teachers_result.get("data", [])
         if not teachers:
             return {"teachers": []}
 
+        teacher_map = {t["id"]: t for t in teachers}
+
+        # 2. Get all classes for the school, with subjects embedded
+        classes_result = await supabase_client.query("classes") \
+            .select("*, subjects(id, name, category)") \
+            .eq("school_id", profile.school_id) \
+            .execute()
+
+        classes = classes_result.get("data", [])
+
+        # 3. Process classes and subjects in Python
+        classes_by_teacher = {}
+        subjects_by_teacher = {}
+        for cls in classes:
+            teacher_id = cls.get("teacher_id")
+            if not teacher_id:
+                continue
+
+            # Group classes by teacher
+            classes_by_teacher.setdefault(teacher_id, []).append(cls)
+
+            # Group subjects by teacher
+            subject = cls.get("subjects")
+            if subject:
+                subjects_by_teacher.setdefault(teacher_id, {})[subject["id"]] = subject
+
+        # 4. Enrich the teacher data
         enriched_teachers = []
-
-        for teacher in teachers:
-            teacher_id = teacher["id"]
-
-            # Get classes taught by this teacher
-            query = await supabase_client.query("classes")
-            classes_result = await query.select("id, class_name, year_level, subject_id").eq("teacher_id",
-                                                                                             teacher_id).execute()
-
-            classes_taught = classes_result["data"]
-
-            # Get unique subject IDs
-            subject_ids = list(set([c["subject_id"] for c in classes_taught]))
-
-            # Get subject details
-            subjects_taught = []
-            if subject_ids:
-                query = await supabase_client.query("subjects")
-                subjects_result = await query.select("id, name, category").in_("id", subject_ids).execute()
-                subjects_taught = subjects_result["data"]
+        for teacher_id, teacher in teacher_map.items():
+            classes_taught = classes_by_teacher.get(teacher_id, [])
+            subjects_taught_map = subjects_by_teacher.get(teacher_id, {})
 
             enriched_teachers.append({
                 "id": teacher["id"],
                 "full_name": teacher["full_name"],
                 "email": teacher["email"],
                 "classes_taught": classes_taught,
-                "subjects_taught": subjects_taught,
+                "subjects_taught": list(subjects_taught_map.values()),
                 "classes_count": len(classes_taught),
-                "subjects_count": len(subjects_taught)
+                "subjects_count": len(subjects_taught_map)
             })
 
         return {"teachers": enriched_teachers}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        end_time = time.time()
+        print(f"PERF: get_all_teachers took {end_time - start_time:.4f} seconds.")
 
 
 @app.get("/admin/teacher/{teacher_id}")
@@ -917,8 +1099,7 @@ async def get_teacher_details(
     """Admin gets detailed teacher information"""
     try:
         # Get teacher profile
-        query = await supabase_client.query("profiles")
-        teacher_result = await query.select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
+        teacher_result = await supabase_client.query("profiles").select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
                                                                                                             UserRole.TEACHER).execute()
 
         if not teacher_result["data"]:
@@ -927,8 +1108,7 @@ async def get_teacher_details(
         teacher = teacher_result["data"][0]
 
         # Get classes taught
-        query = await supabase_client.query("classes")
-        classes_result = await query.select("*").eq("teacher_id", teacher_id).execute()
+        classes_result = await supabase_client.query("classes").select("*").eq("teacher_id", teacher_id).execute()
 
         classes = classes_result["data"]
 
@@ -937,8 +1117,7 @@ async def get_teacher_details(
 
         subjects = []
         if subject_ids:
-            query = await supabase_client.query("subjects")
-            subjects_result = await query.select("*").in_("id", subject_ids).execute()
+            subjects_result = await supabase_client.query("subjects").select("*").in_("id", subject_ids).execute()
             subjects = subjects_result["data"]
 
         # Get students in teacher's classes
@@ -946,14 +1125,12 @@ async def get_teacher_details(
 
         students = []
         if class_ids:
-            query = await supabase_client.query("student_classes")
-            student_classes_result = await query.select("student_id, class_id").in_("class_id", class_ids).execute()
+            student_classes_result = await supabase_client.query("student_classes").select("student_id, class_id").in_("class_id", class_ids).execute()
 
             student_ids = list(set([sc["student_id"] for sc in student_classes_result["data"]]))
 
             if student_ids:
-                query = await supabase_client.query("profiles")
-                students_result = await query.select("id, full_name, email, year_level").in_("id",
+                students_result = await supabase_client.query("profiles").select("id, full_name, email, year_level").in_("id",
                                                                                              student_ids).execute()
                 class_name_by_id = {c["id"]: c.get("class_name", "") for c in classes}
                 class_ids_by_student = {}
@@ -1031,8 +1208,7 @@ async def add_teacher(
             "email": request.email
         }
 
-        query = await supabase_client.query("profiles")
-        result = await query.insert(profile_data).execute()
+        result = await supabase_client.query("profiles").insert(profile_data).execute()
 
         if result.get("error"):
             raise Exception(result["error"])
@@ -1057,8 +1233,7 @@ async def update_teacher(
     """Admin updates teacher profile"""
     try:
         # Verify teacher exists and belongs to school
-        query = await supabase_client.query("profiles")
-        teacher_check = await query.select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
+        teacher_check = await supabase_client.query("profiles").select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
                                                                                                            UserRole.TEACHER).execute()
 
         if not teacher_check["data"]:
@@ -1075,8 +1250,7 @@ async def update_teacher(
             raise HTTPException(status_code=400, detail="No fields to update")
 
         # Update profile
-        query = await supabase_client.query("profiles")
-        result = await query.update(update_data).eq("id", teacher_id).execute()
+        result = await supabase_client.query("profiles").update(update_data).eq("id", teacher_id).execute()
 
         if result.get("error"):
             raise Exception(result["error"])
@@ -1097,16 +1271,14 @@ async def delete_teacher(
     """Admin deletes teacher (cascades to classes)"""
     try:
         # Verify teacher exists and belongs to school
-        query = await supabase_client.query("profiles")
-        teacher_check = await query.select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
+        teacher_check = await supabase_client.query("profiles").select("*").eq("id", teacher_id).eq("school_id", profile.school_id).eq("role",
                                                                                                            UserRole.TEACHER).execute()
 
         if not teacher_check["data"]:
             raise HTTPException(status_code=404, detail="Teacher not found")
 
         # Delete profile (cascades due to foreign keys)
-        query = await supabase_client.query("profiles")
-        result = await query.delete().eq("id", teacher_id).execute()
+        result = await supabase_client.query("profiles").delete().eq("id", teacher_id).execute()
 
         if result.get("error"):
             raise Exception(result["error"])
@@ -1153,8 +1325,7 @@ async def get_all_subjects(
                 continue
 
             # Count classes for this subject
-            query = await supabase_client.query("classes")
-            classes_result = await query.select("id").eq("subject_id", existing["id"]).execute()
+            classes_result = await supabase_client.query("classes").select("id").eq("subject_id", existing["id"]).execute()
 
             classes_count = len(classes_result["data"])
 
@@ -1181,33 +1352,36 @@ async def get_all_classes(
         profile: Profile = Depends(require_admin)
 ):
     """Admin gets all classes in the school"""
+    start_time = time.time()
     try:
-        # Get all classes
-        query = await supabase_client.query("classes")
-        classes_result = await query.select("*").eq("school_id", profile.school_id).execute()
+        # Get all classes and embed teacher and subject data in one query
+        classes_result = await supabase_client.query("classes") \
+            .select("*, subjects(name, category), profiles(full_name)") \
+            .eq("school_id", profile.school_id) \
+            .execute()
 
-        classes = classes_result["data"]
+        classes = classes_result.get("data", [])
 
         if not classes:
             return {"classes": []}
 
+        class_ids = [c["id"] for c in classes]
+
+        # Get all student counts in one query
+        student_classes_result = await supabase_client.query("student_classes") \
+            .select("class_id") \
+            .in_("class_id", class_ids) \
+            .execute()
+
+        student_counts = {}
+        for sc in student_classes_result.get("data", []):
+            class_id = sc["class_id"]
+            student_counts[class_id] = student_counts.get(class_id, 0) + 1
+
         enriched_classes = []
-
         for cls in classes:
-            # Get subject
-            query = await supabase_client.query("subjects")
-            subject_result = await query.select("name, category").eq("id", cls["subject_id"]).execute()
-            subject = subject_result["data"][0] if subject_result["data"] else {}
-
-            # Get teacher
-            query = await supabase_client.query("profiles")
-            teacher_result = await query.select("full_name").eq("id", cls["teacher_id"]).execute()
-            teacher = teacher_result["data"][0] if teacher_result["data"] else {}
-
-            # Count students
-            query = await supabase_client.query("student_classes")
-            students_result = await query.select("student_id").eq("class_id", cls["id"]).execute()
-            student_count = len(students_result["data"])
+            subject = cls.get("subjects", {}) or {}
+            teacher = cls.get("profiles", {}) or {}
 
             enriched_classes.append({
                 "id": cls["id"],
@@ -1218,13 +1392,16 @@ async def get_all_classes(
                 "teacher_name": teacher.get("full_name", ""),
                 "teacher_id": cls["teacher_id"],
                 "subject_id": cls["subject_id"],
-                "student_count": student_count
+                "student_count": student_counts.get(cls["id"], 0)
             })
 
         return {"classes": enriched_classes}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    finally:
+        end_time = time.time()
+        print(f"PERF: get_all_classes took {end_time - start_time:.4f} seconds.")
 
 
 @app.post("/admin/class")
@@ -1248,16 +1425,14 @@ async def create_class(
             raise HTTPException(status_code=400, detail="Subject is required")
 
         # Verify subject exists and belongs to school
-        query = await supabase_client.query("subjects")
-        subject_check = await query.select("*").eq("id", subject_id).eq("school_id",
+        subject_check = await supabase_client.query("subjects").select("*").eq("id", subject_id).eq("school_id",
                                                                                 profile.school_id).execute()
 
         if not subject_check["data"]:
             raise HTTPException(status_code=404, detail="Subject not found")
 
         # Verify teacher exists and belongs to school
-        query = await supabase_client.query("profiles")
-        teacher_check = await query.select("*").eq("id", request.teacher_id).eq("school_id", profile.school_id).eq(
+        teacher_check = await supabase_client.query("profiles").select("*").eq("id", request.teacher_id).eq("school_id", profile.school_id).eq(
             "role", UserRole.TEACHER).execute()
 
         if not teacher_check["data"]:
@@ -1272,8 +1447,7 @@ async def create_class(
             "class_name": request.class_name
         }
 
-        query = await supabase_client.query("classes")
-        result = await query.insert(class_data).execute()
+        result = await supabase_client.query("classes").insert(class_data).execute()
 
         if result.get("error"):
             raise Exception(result["error"])
@@ -1286,8 +1460,7 @@ async def create_class(
             unique_student_ids = list(dict.fromkeys(student_ids))
 
             if unique_student_ids:
-                query = await supabase_client.query("profiles")
-                students_result = await query.select("id, year_level").in_("id", unique_student_ids).eq(
+                students_result = await supabase_client.query("profiles").select("id, year_level").in_("id", unique_student_ids).eq(
                     "school_id", profile.school_id
                 ).eq("role", UserRole.STUDENT).execute()
 
@@ -1303,8 +1476,7 @@ async def create_class(
                     raise HTTPException(status_code=400, detail="All students must be in the same year level as the class")
 
                 insert_rows = [{"student_id": student_id, "class_id": class_id} for student_id in unique_student_ids]
-                query = await supabase_client.query("student_classes")
-                insert_result = await query.insert(insert_rows).execute()
+                insert_result = await supabase_client.query("student_classes").insert(insert_rows).execute()
                 if insert_result.get("error"):
                     raise Exception(insert_result["error"])
 
@@ -1332,8 +1504,7 @@ async def update_class(
 ):
     """Admin updates class details and roster"""
     try:
-        query = await supabase_client.query("classes")
-        class_result = await query.select("*").eq("id", class_id).eq("school_id", profile.school_id).execute()
+        class_result = await supabase_client.query("classes").select("*").eq("id", class_id).eq("school_id", profile.school_id).execute()
 
         if not class_result["data"]:
             raise HTTPException(status_code=404, detail="Class not found")
@@ -1350,15 +1521,13 @@ async def update_class(
                     raise HTTPException(status_code=404, detail="Subject not found")
                 resolved_subject_id = subject["id"]
             if resolved_subject_id:
-                query = await supabase_client.query("subjects")
-                subject_check = await query.select("id").eq("id", resolved_subject_id).eq("school_id",
+                subject_check = await supabase_client.query("subjects").select("id").eq("id", resolved_subject_id).eq("school_id",
                                                                                         profile.school_id).execute()
                 if not subject_check["data"]:
                     raise HTTPException(status_code=404, detail="Subject not found")
 
         if request.teacher_id is not None:
-            query = await supabase_client.query("profiles")
-            teacher_check = await query.select("id").eq("id", request.teacher_id).eq("school_id",
+            teacher_check = await supabase_client.query("profiles").select("id").eq("id", request.teacher_id).eq("school_id",
                                                                                       profile.school_id).eq(
                 "role", UserRole.TEACHER).execute()
             if not teacher_check["data"]:
@@ -1369,13 +1538,11 @@ async def update_class(
         )
 
         if request.year_level is not None and request.student_ids is None:
-            query = await supabase_client.query("student_classes")
-            roster_result = await query.select("student_id").eq("class_id", class_id).execute()
+            roster_result = await supabase_client.query("student_classes").select("student_id").eq("class_id", class_id).execute()
             roster_ids = [row["student_id"] for row in roster_result["data"]]
 
             if roster_ids:
-                query = await supabase_client.query("profiles")
-                students_result = await query.select("id, year_level").in_("id", roster_ids).execute()
+                students_result = await supabase_client.query("profiles").select("id, year_level").in_("id", roster_ids).execute()
                 mismatched = [
                     s for s in students_result["data"]
                     if not s.get("year_level") or s.get("year_level") != effective_year_level
@@ -1395,8 +1562,7 @@ async def update_class(
             update_data["class_name"] = request.class_name
 
         if update_data:
-            query = await supabase_client.query("classes")
-            result = await query.update(update_data).eq("id", class_id).execute()
+            result = await supabase_client.query("classes").update(update_data).eq("id", class_id).execute()
             if result.get("error"):
                 raise Exception(result["error"])
 
@@ -1405,8 +1571,7 @@ async def update_class(
             unique_student_ids = list(dict.fromkeys(student_ids))
 
             if unique_student_ids:
-                query = await supabase_client.query("profiles")
-                students_result = await query.select("id, year_level").in_("id", unique_student_ids).eq(
+                students_result = await supabase_client.query("profiles").select("id, year_level").in_("id", unique_student_ids).eq(
                     "school_id", profile.school_id
                 ).eq("role", UserRole.STUDENT).execute()
 
@@ -1422,8 +1587,7 @@ async def update_class(
                     raise HTTPException(status_code=400,
                                         detail="All students must be in the same year level as the class")
 
-            query = await supabase_client.query("student_classes")
-            current_result = await query.select("student_id").eq("class_id", class_id).execute()
+            current_result = await supabase_client.query("student_classes").select("student_id").eq("class_id", class_id).execute()
             current_ids = [row["student_id"] for row in current_result["data"]]
 
             current_set = set(current_ids)
@@ -1433,15 +1597,13 @@ async def update_class(
             to_remove = [student_id for student_id in current_ids if student_id not in requested_set]
 
             if to_remove:
-                query = await supabase_client.query("student_classes")
-                delete_result = await query.delete().eq("class_id", class_id).in_("student_id", to_remove).execute()
+                delete_result = await supabase_client.query("student_classes").delete().eq("class_id", class_id).in_("student_id", to_remove).execute()
                 if delete_result.get("error"):
                     raise Exception(delete_result["error"])
 
             if to_add:
                 insert_rows = [{"student_id": student_id, "class_id": class_id} for student_id in to_add]
-                query = await supabase_client.query("student_classes")
-                insert_result = await query.insert(insert_rows).execute()
+                insert_result = await supabase_client.query("student_classes").insert(insert_rows).execute()
                 if insert_result.get("error"):
                     raise Exception(insert_result["error"])
 
@@ -1460,19 +1622,16 @@ async def delete_class(
 ):
     """Admin deletes a class and clears roster"""
     try:
-        query = await supabase_client.query("classes")
-        class_result = await query.select("id").eq("id", class_id).eq("school_id", profile.school_id).execute()
+        class_result = await supabase_client.query("classes").select("id").eq("id", class_id).eq("school_id", profile.school_id).execute()
 
         if not class_result["data"]:
             raise HTTPException(status_code=404, detail="Class not found")
 
-        query = await supabase_client.query("student_classes")
-        roster_delete = await query.delete().eq("class_id", class_id).execute()
+        roster_delete = await supabase_client.query("student_classes").delete().eq("class_id", class_id).execute()
         if roster_delete.get("error"):
             raise Exception(roster_delete["error"])
 
-        query = await supabase_client.query("classes")
-        class_delete = await query.delete().eq("id", class_id).execute()
+        class_delete = await supabase_client.query("classes").delete().eq("id", class_id).execute()
         if class_delete.get("error"):
             raise Exception(class_delete["error"])
 
@@ -1497,20 +1656,17 @@ async def get_reports_summary(
         school_id = profile.school_id
 
         # Get all classes in school
-        query = await supabase_client.query("classes")
-        classes_result = await query.select("*").eq("school_id", school_id).execute()
+        classes_result = await supabase_client.query("classes").select("*").eq("school_id", school_id).execute()
 
         classes = classes_result["data"]
 
         # Get all students with assessments
-        query = await supabase_client.query("assessment_results")
-        assessments_result = await query.select("user_id, ranking").eq("school_id", school_id).execute()
+        assessments_result = await supabase_client.query("assessment_results").select("user_id, ranking").eq("school_id", school_id).execute()
 
         assessments_by_user = {a["user_id"]: a["ranking"] for a in assessments_result["data"]}
 
         # Get all students
-        query = await supabase_client.query("profiles")
-        students_result = await query.select("id, full_name, email, year_level").eq("school_id", school_id).eq("role",
+        students_result = await supabase_client.query("profiles").select("id, full_name, email, year_level").eq("school_id", school_id).eq("role",
                                                                                                                UserRole.STUDENT).execute()
 
         students = students_result["data"]
@@ -1545,20 +1701,17 @@ async def get_reports_summary(
             class_id = cls["id"]
 
             # Count students in class
-            query = await supabase_client.query("student_classes")
-            student_classes_result = await query.select("student_id").eq("class_id", class_id).execute()
+            student_classes_result = await supabase_client.query("student_classes").select("student_id").eq("class_id", class_id).execute()
 
             student_count = len(student_classes_result["data"])
 
             # Get subject name
-            query = await supabase_client.query("subjects")
-            subject_result = await query.select("name, category").eq("id", cls["subject_id"]).execute()
+            subject_result = await supabase_client.query("subjects").select("name, category").eq("id", cls["subject_id"]).execute()
 
             subject = subject_result["data"][0] if subject_result["data"] else {}
 
             # Get teacher name
-            query = await supabase_client.query("profiles")
-            teacher_result = await query.select("full_name").eq("id", cls["teacher_id"]).execute()
+            teacher_result = await supabase_client.query("profiles").select("full_name").eq("id", cls["teacher_id"]).execute()
 
             teacher = teacher_result["data"][0] if teacher_result["data"] else {}
 

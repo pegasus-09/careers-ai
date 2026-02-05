@@ -74,7 +74,7 @@ class SupabaseClient:
                 "Content-Type": "application/json"
             }
 
-    async def query(self, table: str, user_token: Optional[str] = None) -> 'QueryBuilder':
+    def query(self, table: str, user_token: Optional[str] = None) -> 'QueryBuilder':
         """Start a query on a table"""
         return QueryBuilder(self, table, user_token)
 
@@ -143,11 +143,6 @@ class QueryBuilder:
         """Execute the query"""
         try:
             headers = self.client.get_headers(self.user_token)
-
-            print(f"[DEBUG] {self.method} {self.url}")
-            print(f"[DEBUG] Params: {self.params}")
-            if self.body:
-                print(f"[DEBUG] Body: {str(self.body)[:200]}")
 
             if self.method == "GET":
                 response = await self.client.client.get(
