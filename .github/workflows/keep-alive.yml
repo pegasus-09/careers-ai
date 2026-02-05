@@ -1,0 +1,72 @@
+name: Keep LaunchPad Alive
+
+on:
+  schedule:
+    # Run every 10 minutes to prevent cold starts
+    - cron: '*/10 * * * *'
+
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Ping Backend Health Check
+        id: backend
+        run: |
+          echo "Pinging backend health endpoint..."
+          response=$(curl -s -X GET "https://careers-ai.onrender.com/health" \
+            -H "User-Agent: LaunchPad-KeepAlive" \
+            -H "Accept: application/json" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -w "\n%{http_code}")
+          
+          # Extract status code (last line)
+          http_code=$(echo "$response" | tail -1)
+          body=$(echo "$response" | head -1)
+          
+          echo "HTTP Status: $http_code"
+          echo "Response: $body"
+          
+          # Accept 200 or 302 as success
+          if [ "$http_code" = "200" ] || [ "$http_code" = "302" ]; then
+            echo "✅ Backend is alive"
+            echo "backend_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  Backend returned status $http_code"
+            echo "backend_status=warning" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Ping Frontend
+        id: frontend
+        run: |
+          echo "Pinging frontend..."
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" "https://your-frontend.vercel.app/" \
+            -H "User-Agent: LaunchPad-KeepAlive" \
+            --connect-timeout 10 \
+            --max-time 30)
+          
+          echo "HTTP Status: $http_code"
+          
+          if [ "$http_code" = "200" ] || [ "$http_code" = "302" ]; then
+            echo "✅ Frontend is alive"
+            echo "frontend_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  Frontend returned status $http_code"
+            echo "frontend_status=warning" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Keep-Alive Check Results 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Backend:** ${{ steps.backend.outputs.backend_status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Frontend:** ${{ steps.frontend.outputs.frontend_status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Keep-alive ping completed successfully" >> $GITHUB_STEP_SUMMARY
