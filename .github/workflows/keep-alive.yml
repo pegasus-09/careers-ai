@@ -21,7 +21,7 @@ jobs:
             -H "User-Agent: LaunchPad-KeepAlive" \
             -H "Accept: application/json" \
             --connect-timeout 10 \
-            --max-time 30 \
+            --max-time 60 \
             -w "\n%{http_code}")
           
           # Extract status code (last line)
@@ -40,25 +40,6 @@ jobs:
             echo "backend_status=warning" >> $GITHUB_OUTPUT
           fi
 
-      - name: Ping Frontend
-        id: frontend
-        run: |
-          echo "Pinging frontend..."
-          http_code=$(curl -s -o /dev/null -w "%{http_code}" "https://your-frontend.vercel.app/" \
-            -H "User-Agent: LaunchPad-KeepAlive" \
-            --connect-timeout 10 \
-            --max-time 30)
-          
-          echo "HTTP Status: $http_code"
-          
-          if [ "$http_code" = "200" ] || [ "$http_code" = "302" ]; then
-            echo "✅ Frontend is alive"
-            echo "frontend_status=success" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️  Frontend returned status $http_code"
-            echo "frontend_status=warning" >> $GITHUB_OUTPUT
-          fi
-
       - name: Summary
         if: always()
         run: |
@@ -67,6 +48,5 @@ jobs:
           echo "**Timestamp:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Backend:** ${{ steps.backend.outputs.backend_status }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Frontend:** ${{ steps.frontend.outputs.frontend_status }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "✅ Keep-alive ping completed successfully" >> $GITHUB_STEP_SUMMARY
