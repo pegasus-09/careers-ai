@@ -22,8 +22,30 @@ from inference.answer_converter import convert_answers_to_profile
 
 from datetime import datetime
 import time
+import csv
+from pathlib import Path
 
 load_dotenv()
+
+# ============================================================================
+# O*NET SOC TITLE CACHE (loaded once at startup)
+# ============================================================================
+
+def load_soc_title_mapping() -> list[tuple[str, str, str]]:
+    """Load O*NET occupation data into a search index of (code, title, title_lower) tuples."""
+    csv_path = Path(__file__).parent / "data" / "onet" / "csv" / "occupation_data.csv"
+    entries: list[tuple[str, str, str]] = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            code = row["O*NET-SOC Code"]
+            title = row["Title"]
+            entries.append((code, title, title.lower()))
+    return entries
+
+SOC_INDEX = load_soc_title_mapping()
+SOC_CODES_SET = {code for code, _, _ in SOC_INDEX}
+print(f"Loaded {len(SOC_INDEX)} O*NET occupations into search index")
 app = FastAPI(title="LaunchPad Career Guidance API", version="2.0.0")
 
 # CORS configuration
@@ -127,6 +149,21 @@ class StudentDetailResponse(BaseModel):
     email: str
     year_level: str
     classes: List[ClassDetail]
+
+
+class CareerAspirationRequest(BaseModel):
+    soc_codes: List[str]
+
+
+class PortfolioData(BaseModel):
+    summary: Optional[str] = None
+    year_level: Optional[str] = None
+    subjects: Optional[List[Dict]] = []
+    work_experience: Optional[List[Dict]] = []
+    certifications: Optional[List[Dict]] = []
+    volunteering: Optional[List[Dict]] = []
+    extracurriculars: Optional[List[Dict]] = []
+    skills: Optional[List[str]] = []
 
 
 HARD_CODED_SUBJECTS = [
@@ -406,6 +443,215 @@ async def add_work_experience(
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
+@app.get("/student/portfolio")
+async def get_student_portfolio(profile: Profile = Depends(require_student)):
+    """Get student portfolio and autofill data from system tables"""
+    try:
+        # Always fetch autofill data from system tables
+        # 1. Year level from profile
+        year_level = profile.year_level
+
+        # 2. Subjects from student_classes -> classes -> subjects
+        classes_result = (
+            await supabase_client.query("student_classes")
+            .select("class_id")
+            .eq("student_id", profile.id)
+            .execute()
+        )
+        class_ids = [c["class_id"] for c in classes_result.get("data", [])]
+
+        subjects = []
+        if class_ids:
+            classes_info = (
+                await supabase_client.query("classes")
+                .select("subject_id,class_name")
+                .in_("id", class_ids)
+                .execute()
+            )
+            subject_ids = list(set(
+                c["subject_id"] for c in classes_info.get("data", []) if c.get("subject_id")
+            ))
+            if subject_ids:
+                subjects_result = (
+                    await supabase_client.query("subjects")
+                    .select("id,name,category")
+                    .in_("id", subject_ids)
+                    .execute()
+                )
+                subjects = [
+                    {"name": s["name"], "category": s.get("category", "")}
+                    for s in subjects_result.get("data", [])
+                ]
+
+        # 3. Work experiences
+        experiences_result = (
+            await supabase_client.query("work_experiences")
+            .select("title,organisation,description,start_date,end_date")
+            .eq("student_id", profile.id)
+            .execute()
+        )
+        work_experience = experiences_result.get("data", [])
+
+        autofill = {
+            "year_level": year_level,
+            "subjects": subjects,
+            "work_experience": work_experience,
+        }
+
+        # Fetch saved portfolio if exists
+        portfolio_result = (
+            await supabase_client.query("student_portfolios")
+            .select("*")
+            .eq("student_id", profile.id)
+            .execute()
+        )
+        portfolio = portfolio_result["data"][0] if portfolio_result.get("data") else None
+
+        return {"portfolio": portfolio, "autofill": autofill}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching portfolio: {str(e)}")
+
+
+@app.put("/student/portfolio")
+async def save_student_portfolio(
+    request: PortfolioData,
+    profile: Profile = Depends(require_student)
+):
+    """Save or update student portfolio"""
+    try:
+        portfolio_data = {
+            "student_id": profile.id,
+            "summary": request.summary,
+            "year_level": request.year_level,
+            "subjects": request.subjects,
+            "work_experience": request.work_experience,
+            "certifications": request.certifications,
+            "volunteering": request.volunteering,
+            "extracurriculars": request.extracurriculars,
+            "skills": request.skills,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        # Check if portfolio exists
+        existing = (
+            await supabase_client.query("student_portfolios")
+            .select("student_id")
+            .eq("student_id", profile.id)
+            .execute()
+        )
+
+        if existing.get("data"):
+            # Update existing
+            update_data = {k: v for k, v in portfolio_data.items() if k != "student_id"}
+            result = (
+                await supabase_client.query("student_portfolios")
+                .update(update_data)
+                .eq("student_id", profile.id)
+                .execute()
+            )
+            message = "Portfolio updated successfully"
+        else:
+            # Insert new
+            result = (
+                await supabase_client.query("student_portfolios")
+                .insert(portfolio_data)
+                .execute()
+            )
+            message = "Portfolio created successfully"
+
+        if result.get("error"):
+            raise Exception(result["error"])
+
+        return {"message": message}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving portfolio: {str(e)}")
+
+
+# ============================================================================
+# CAREER SEARCH & ASPIRATION ENDPOINTS
+# ============================================================================
+
+
+@app.get("/careers/search")
+async def search_careers(
+    q: str = "",
+    profile: Profile = Depends(require_profile)
+):
+    """Search O*NET careers by title substring (case-insensitive). Max 10 results."""
+    query = q.strip().lower()
+    if not query or len(query) < 2:
+        return {"results": []}
+
+    results = []
+    for code, title, title_lower in SOC_INDEX:
+        if query in title_lower:
+            results.append({"soc_code": code, "title": title})
+            if len(results) >= 10:
+                break
+
+    return {"results": results}
+
+
+@app.get("/student/career-aspirations")
+async def get_student_career_aspirations(
+    profile: Profile = Depends(require_student)
+):
+    """Student reads their saved career aspirations."""
+    try:
+        result = await supabase_client.query("student_career_aspirations") \
+            .select("id, soc_code, title, created_at") \
+            .eq("student_id", profile.id) \
+            .execute()
+        return {"aspirations": result.get("data", [])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.put("/student/career-aspirations")
+async def save_student_career_aspirations(
+    request: CareerAspirationRequest,
+    profile: Profile = Depends(require_student)
+):
+    """Replace the student's full career aspirations list."""
+    try:
+        # Validate SOC codes against in-memory cache
+        invalid_codes = [c for c in request.soc_codes if c not in SOC_CODES_SET]
+        if invalid_codes:
+            raise HTTPException(status_code=400, detail=f"Invalid SOC codes: {', '.join(invalid_codes)}")
+
+        # Delete existing aspirations
+        await supabase_client.query("student_career_aspirations") \
+            .delete() \
+            .eq("student_id", profile.id) \
+            .execute()
+
+        # Insert new ones
+        if request.soc_codes:
+            # Build title lookup
+            title_by_code = {code: title for code, title, _ in SOC_INDEX}
+            rows = [
+                {
+                    "student_id": profile.id,
+                    "soc_code": code,
+                    "title": title_by_code[code],
+                }
+                for code in request.soc_codes
+            ]
+            result = await supabase_client.query("student_career_aspirations") \
+                .insert(rows) \
+                .execute()
+            if result.get("error"):
+                raise Exception(result["error"])
+
+        return {"message": "Career aspirations saved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
 # ============================================================================
 # TEACHER ENDPOINTS
 # ============================================================================
@@ -449,7 +695,69 @@ async def get_teacher_students(profile: Profile = Depends(require_teacher)):
             .execute()
         )
 
-        return {"students": profiles_result["data"]}
+        # Enrich students with their class names
+        students_with_classes = []
+        for student in profiles_result["data"]:
+            # Get class_ids this student is in
+            student_class_ids_result = (
+                await supabase_client.query("student_classes")
+                .select("class_id")
+                .eq("student_id", student["id"])
+                .in_("class_id", class_ids)
+                .execute()
+            )
+            student_class_ids_list = [sc["class_id"] for sc in student_class_ids_result["data"]]
+
+            # Get class names with subjects
+            if student_class_ids_list:
+                classes_info_result = (
+                    await supabase_client.query("classes")
+                    .select("id, class_name, subject_id")
+                    .in_("id", student_class_ids_list)
+                    .execute()
+                )
+                class_names = []
+                class_ids_for_student = []
+                for c in classes_info_result["data"]:
+                    class_names.append(c["class_name"])
+                    class_ids_for_student.append(c["id"])
+                student["class_names"] = class_names
+                student["class_ids"] = class_ids_for_student
+            else:
+                student["class_names"] = []
+                student["class_ids"] = []
+
+            students_with_classes.append(student)
+
+        return {"students": students_with_classes}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/teacher/classes")
+async def get_teacher_classes(profile: Profile = Depends(require_teacher)):
+    """Teacher gets all classes they teach"""
+    try:
+        classes_result = (
+            await supabase_client.query("classes")
+            .select("id, class_name, subject_id, year_level")
+            .eq("teacher_id", profile.id)
+            .execute()
+        )
+
+        # Get subject names for each class
+        classes_with_subjects = []
+        for cls in classes_result["data"]:
+            subject_result = (
+                await supabase_client.query("subjects")
+                .select("name")
+                .eq("id", cls["subject_id"])
+                .execute()
+            )
+            cls["subject_name"] = subject_result["data"][0]["name"] if subject_result["data"] else None
+            classes_with_subjects.append(cls)
+
+        return {"classes": classes_with_subjects}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
@@ -778,6 +1086,115 @@ async def get_student_details(
         }
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/admin/student/{student_id}/career-aspirations")
+async def get_student_career_aspirations_admin(
+    student_id: str,
+    profile: Profile = Depends(require_admin)
+):
+    """Admin reads a student's career aspirations (with school_id check)."""
+    try:
+        # Verify student belongs to same school
+        student_check = await supabase_client.query("profiles").select("id").eq("id", student_id).eq("school_id", profile.school_id).execute()
+        if not student_check["data"]:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        result = await supabase_client.query("student_career_aspirations") \
+            .select("id, soc_code, title, created_at") \
+            .eq("student_id", student_id) \
+            .execute()
+        return {"aspirations": result.get("data", [])}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/admin/student/{student_id}/portfolio")
+async def get_student_portfolio_admin(
+        student_id: str,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin gets a student's saved portfolio"""
+    try:
+        # Verify student belongs to same school
+        student_result = await supabase_client.query("profiles").select("id,full_name,year_level,school_id").eq("id", student_id).eq("school_id", profile.school_id).execute()
+        if not student_result["data"]:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        student = student_result["data"][0]
+
+        portfolio_result = await supabase_client.query("student_portfolios").select("*").eq("student_id", student_id).execute()
+        portfolio = portfolio_result["data"][0] if portfolio_result.get("data") else None
+
+        return {"portfolio": portfolio, "student_name": student.get("full_name", ""), "year_level": student.get("year_level", "")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/admin/student/{student_id}/notes")
+async def get_student_notes(
+        student_id: str,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin gets all notes for a student"""
+    try:
+        notes_result = await supabase_client.query("admin_notes") \
+            .select("*") \
+            .eq("student_id", student_id) \
+            .eq("school_id", profile.school_id) \
+            .execute()
+        return {"notes": notes_result.get("data", [])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+class AdminNoteRequest(BaseModel):
+    note_text: str
+
+
+@app.post("/admin/student/{student_id}/note")
+async def add_student_note(
+        student_id: str,
+        request: AdminNoteRequest,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin adds a note on a student"""
+    try:
+        # Verify student belongs to same school
+        student_check = await supabase_client.query("profiles").select("id").eq("id", student_id).eq("school_id", profile.school_id).execute()
+        if not student_check["data"]:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        note_data = {
+            "student_id": student_id,
+            "admin_id": profile.id,
+            "school_id": profile.school_id,
+            "note_text": request.note_text,
+        }
+        result = await supabase_client.query("admin_notes").insert(note_data).execute()
+        return {"message": "Note added", "note": result["data"][0] if result.get("data") else None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.delete("/admin/student/{student_id}/note/{note_id}")
+async def delete_student_note(
+        student_id: str,
+        note_id: str,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin deletes a note"""
+    try:
+        await supabase_client.query("admin_notes").delete().eq("id", note_id).eq("school_id", profile.school_id).execute()
+        return {"message": "Note deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
@@ -1354,11 +1771,14 @@ async def get_all_classes(
     """Admin gets all classes in the school"""
     start_time = time.time()
     try:
-        # Get all classes and embed teacher and subject data in one query
+        # Get all classes (simple select, no embedding)
         classes_result = await supabase_client.query("classes") \
-            .select("*, subjects(name, category), profiles(full_name)") \
+            .select("*") \
             .eq("school_id", profile.school_id) \
             .execute()
+
+        if classes_result.get("error"):
+            raise HTTPException(status_code=500, detail=f"DB error: {classes_result['error']}")
 
         classes = classes_result.get("data", [])
 
@@ -1366,8 +1786,28 @@ async def get_all_classes(
             return {"classes": []}
 
         class_ids = [c["id"] for c in classes]
+        subject_ids = list(set(c["subject_id"] for c in classes if c.get("subject_id")))
+        teacher_ids = list(set(c["teacher_id"] for c in classes if c.get("teacher_id")))
 
-        # Get all student counts in one query
+        # Fetch subjects, teachers, and student counts separately
+        subjects_map = {}
+        if subject_ids:
+            subjects_result = await supabase_client.query("subjects") \
+                .select("id, name, category") \
+                .in_("id", subject_ids) \
+                .execute()
+            for s in subjects_result.get("data", []):
+                subjects_map[s["id"]] = s
+
+        teachers_map = {}
+        if teacher_ids:
+            teachers_result = await supabase_client.query("profiles") \
+                .select("id, full_name") \
+                .in_("id", teacher_ids) \
+                .execute()
+            for t in teachers_result.get("data", []):
+                teachers_map[t["id"]] = t
+
         student_classes_result = await supabase_client.query("student_classes") \
             .select("class_id") \
             .in_("class_id", class_ids) \
@@ -1380,18 +1820,18 @@ async def get_all_classes(
 
         enriched_classes = []
         for cls in classes:
-            subject = cls.get("subjects", {}) or {}
-            teacher = cls.get("profiles", {}) or {}
+            subject = subjects_map.get(cls.get("subject_id"), {})
+            teacher = teachers_map.get(cls.get("teacher_id"), {})
 
             enriched_classes.append({
                 "id": cls["id"],
                 "class_name": cls["class_name"],
-                "year_level": cls["year_level"],
+                "year_level": cls.get("year_level"),
                 "subject_name": subject.get("name", ""),
                 "subject_category": subject.get("category", ""),
                 "teacher_name": teacher.get("full_name", ""),
-                "teacher_id": cls["teacher_id"],
-                "subject_id": cls["subject_id"],
+                "teacher_id": cls.get("teacher_id"),
+                "subject_id": cls.get("subject_id"),
                 "student_count": student_counts.get(cls["id"], 0)
             })
 
