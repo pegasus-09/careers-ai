@@ -81,8 +81,7 @@ async def upsert_assessment_result(
             "updated_at": datetime.utcnow().isoformat()
         }
 
-        query = await supabase_client.query("assessment_results", user_token)
-        result = await query.upsert(data).execute()
+        result = await supabase_client.query("assessment_results", user_token).upsert(data).execute()
 
         # Success if no error (even if data is empty)
         return result.get("error") is None

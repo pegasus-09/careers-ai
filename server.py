@@ -20,6 +20,9 @@ from supabase_client import supabase_client
 from scripts.rank_all_careers import rank_profiles
 from inference.answer_converter import convert_answers_to_profile
 
+# AI analysis engine (single comprehensive prompt)
+from ai.analysis_engine import run_analysis
+
 from datetime import datetime
 import time
 import csv
@@ -2172,6 +2175,459 @@ async def get_reports_summary(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# AI ANALYSIS ENDPOINTS
+# ============================================================================
+
+
+async def _get_teacher_status(student_id: str) -> dict:
+    """
+    Check how many of a student's teachers have submitted comments.
+    Returns { total_teachers, commented_teachers, all_commented, missing }.
+    """
+    # Get student's class_ids
+    sc_result = await supabase_client.query("student_classes") \
+        .select("class_id") \
+        .eq("student_id", student_id) \
+        .execute()
+    class_ids = [r["class_id"] for r in sc_result.get("data", [])]
+
+    if not class_ids:
+        return {
+            "total_teachers": 0,
+            "commented_teachers": 0,
+            "all_commented": True,
+            "missing": [],
+        }
+
+    # Get distinct teacher_ids from those classes
+    classes_result = await supabase_client.query("classes") \
+        .select("teacher_id") \
+        .in_("id", class_ids) \
+        .execute()
+    all_teacher_ids = list(set(
+        c["teacher_id"] for c in classes_result.get("data", []) if c.get("teacher_id")
+    ))
+
+    if not all_teacher_ids:
+        return {
+            "total_teachers": 0,
+            "commented_teachers": 0,
+            "all_commented": True,
+            "missing": [],
+        }
+
+    # Get teacher_ids that have commented on this student
+    comments_result = await supabase_client.query("teacher_comments") \
+        .select("teacher_id") \
+        .eq("student_id", student_id) \
+        .execute()
+    commented_teacher_ids = set(
+        c["teacher_id"] for c in comments_result.get("data", []) if c.get("teacher_id")
+    )
+
+    missing_ids = [tid for tid in all_teacher_ids if tid not in commented_teacher_ids]
+
+    # Get names for missing teachers
+    missing_names = []
+    if missing_ids:
+        names_result = await supabase_client.query("profiles") \
+            .select("id, full_name") \
+            .in_("id", missing_ids) \
+            .execute()
+        missing_names = [
+            {"id": t["id"], "name": t.get("full_name", "Unknown")}
+            for t in names_result.get("data", [])
+        ]
+
+    return {
+        "total_teachers": len(all_teacher_ids),
+        "commented_teachers": len(commented_teacher_ids & set(all_teacher_ids)),
+        "all_commented": set(all_teacher_ids).issubset(commented_teacher_ids),
+        "missing": missing_names,
+    }
+
+
+@app.get("/student/teacher-status")
+async def get_teacher_comment_status(
+    profile: Profile = Depends(require_student)
+):
+    """Returns teacher comment status for the current student."""
+    try:
+        status = await _get_teacher_status(profile.id)
+        return status
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ── Shared helpers for analysis endpoints ──────────────────────────
+
+async def _load_teacher_comments(student_id: str) -> list[dict]:
+    """Load teacher comments for a student, enriched with teacher name and subject."""
+    comments_result = await supabase_client.query("teacher_comments") \
+        .select("id, comment_text, performance_rating, engagement_rating, teacher_id, class_id") \
+        .eq("student_id", student_id) \
+        .execute()
+
+    raw_comments = comments_result.get("data", [])
+    if not raw_comments:
+        return []
+
+    # Batch-load teacher names
+    teacher_ids = list(set(c["teacher_id"] for c in raw_comments if c.get("teacher_id")))
+    teacher_name_map = {}
+    if teacher_ids:
+        teachers_result = await supabase_client.query("profiles") \
+            .select("id, full_name") \
+            .in_("id", teacher_ids) \
+            .execute()
+        teacher_name_map = {t["id"]: t.get("full_name", "Unknown") for t in teachers_result.get("data", [])}
+
+    # Batch-load class→subject mapping
+    class_ids = list(set(c["class_id"] for c in raw_comments if c.get("class_id")))
+    subject_name_map = {}
+    if class_ids:
+        classes_result = await supabase_client.query("classes") \
+            .select("id, subjects(name)") \
+            .in_("id", class_ids) \
+            .execute()
+        for cls in classes_result.get("data", []):
+            subj = cls.get("subjects")
+            if subj:
+                subject_name_map[cls["id"]] = subj["name"]
+
+    teacher_comments = []
+    for c in raw_comments:
+        teacher_comments.append({
+            "teacher_name": teacher_name_map.get(c.get("teacher_id"), "Unknown"),
+            "subject_name": subject_name_map.get(c.get("class_id"), "Unknown"),
+            "comment_text": c.get("comment_text", ""),
+            "performance_rating": c.get("performance_rating"),
+            "engagement_rating": c.get("engagement_rating"),
+        })
+
+    return teacher_comments
+
+
+async def _load_subject_enrolments(student_id: str) -> list[dict]:
+    """Load a student's subject enrolments from student_classes → classes → subjects."""
+    sc_result = await supabase_client.query("student_classes") \
+        .select("class_id, grade") \
+        .eq("student_id", student_id) \
+        .execute()
+
+    enrollments = sc_result.get("data", [])
+    if not enrollments:
+        return []
+
+    class_ids = [e["class_id"] for e in enrollments]
+    grade_by_class = {e["class_id"]: e.get("grade") for e in enrollments}
+
+    classes_result = await supabase_client.query("classes") \
+        .select("id, year_level, subjects(name)") \
+        .in_("id", class_ids) \
+        .execute()
+
+    subject_enrolments = []
+    for cls in classes_result.get("data", []):
+        subj = cls.get("subjects")
+        if subj:
+            subject_enrolments.append({
+                "subject_name": subj["name"],
+                "year_level": cls.get("year_level", "?"),
+                "grade": grade_by_class.get(cls["id"]),
+            })
+
+    return subject_enrolments
+
+
+def _map_analysis_for_frontend(row: dict) -> dict:
+    """Map DB column names back to frontend field names."""
+    row["strengths"] = row.get("strength_profile")
+    row["gaps"] = row.get("gap_analysis")
+    row["strength_narrative"] = row.get("overall_narrative")
+
+    # Reconstruct career_explanations from stored final_ranking
+    final_ranking = row.get("final_ranking") or []
+    det_top20 = {e["soc_code"]: e["score"] for e in (row.get("deterministic_top20") or [])}
+    career_explanations = {}
+    for entry in final_ranking:
+        soc = entry.get("soc_code", "")
+        career_explanations[soc] = {
+            "title": entry.get("career_name", ""),
+            "score": det_top20.get(soc, 0),
+            "rank": entry.get("rank", 0),
+            "explanation": entry.get("reasoning", ""),
+        }
+    row["career_explanations"] = career_explanations
+    return row
+
+
+async def _store_analysis(student_id: str, school_id: str, answers: dict, result: dict):
+    """Store analysis result in student_analyses table (upsert)."""
+    import json as _json
+
+    analysis_data = {
+        "student_id": student_id,
+        "school_id": school_id,
+        "raw_answers": answers,
+        "assessment_quality": result.get("assessment_quality"),
+        "teacher_comments_snapshot": result.get("data_sources_used"),
+        "subject_enrolments": None,
+        "final_ranking": result.get("final_ranking", []),
+        "strength_profile": result.get("strength_profile"),
+        "gap_analysis": result.get("gap_analysis"),
+        "conflict_notes": result.get("conflicts"),
+        "weighting_explanation": _json.dumps(result.get("data_weighting")) if result.get("data_weighting") else None,
+        "overall_narrative": result.get("overall_narrative"),
+        "confidence_score": result.get("confidence_score", 0.5),
+        "data_sources_used": result.get("data_sources_used"),
+        "deterministic_top20": result.get("deterministic_top20"),
+    }
+
+    existing = await supabase_client.query("student_analyses") \
+        .select("id, analysis_version") \
+        .eq("student_id", student_id) \
+        .execute()
+
+    if existing.get("data"):
+        current_version = existing["data"][0].get("analysis_version", 1)
+        analysis_data["analysis_version"] = current_version + 1
+        await supabase_client.query("student_analyses") \
+            .update(analysis_data) \
+            .eq("id", existing["data"][0]["id"]) \
+            .execute()
+    else:
+        analysis_data["analysis_version"] = 1
+        await supabase_client.query("student_analyses") \
+            .insert(analysis_data) \
+            .execute()
+
+
+# ── Analysis endpoints ─────────────────────────────────────────────
+
+@app.post("/student/analysis")
+async def trigger_student_analysis(
+    profile: Profile = Depends(require_student)
+):
+    """
+    Run full AI analysis for the current student.
+    Requires all teachers to have commented first.
+    """
+    try:
+        # Check teacher gating
+        teacher_status = await _get_teacher_status(profile.id)
+        if not teacher_status["all_commented"]:
+            missing_count = teacher_status["total_teachers"] - teacher_status["commented_teachers"]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Waiting for {missing_count} teacher(s) to submit comments before analysis can run."
+            )
+
+        # Load assessment
+        assessment_result = await supabase_client.query("assessment_results") \
+            .select("raw_answers") \
+            .eq("user_id", profile.id) \
+            .execute()
+
+        if not assessment_result.get("data"):
+            raise HTTPException(status_code=400, detail="No assessment found. Please complete the assessment first.")
+
+        answers = assessment_result["data"][0].get("raw_answers", {})
+        if not answers:
+            raise HTTPException(status_code=400, detail="Assessment data is empty.")
+
+        # Run deterministic engine → top 20
+        user_profile = convert_answers_to_profile(answers)
+        _results, raw_ranking = rank_profiles(user_profile)
+        top_20 = raw_ranking[:20]
+
+        # Load teacher comments (raw text for AI)
+        comments = await _load_teacher_comments(profile.id)
+
+        # Load subject enrolments
+        subjects = await _load_subject_enrolments(profile.id)
+
+        # Run AI analysis
+        result = await run_analysis(answers, top_20, comments, subjects)
+
+        # Store in student_analyses
+        await _store_analysis(profile.id, profile.school_id, answers, result)
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+
+
+@app.get("/student/analysis")
+async def get_student_analysis(
+    profile: Profile = Depends(require_student)
+):
+    """Retrieve stored analysis for the current student."""
+    try:
+        result = await supabase_client.query("student_analyses") \
+            .select("*") \
+            .eq("student_id", profile.id) \
+            .execute()
+
+        if not result.get("data"):
+            return {"analysis": None}
+
+        return {"analysis": _map_analysis_for_frontend(result["data"][0])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/student/{student_id}/analysis")
+async def get_student_analysis_by_id(
+    student_id: str,
+    profile: Profile = Depends(require_profile)
+):
+    """Retrieve stored analysis for a student. Accessible by the student, their teachers, or admin."""
+    try:
+        # Verify access: student can view own, admin can view school, teacher can view their students
+        if profile.role == "student" and profile.id != student_id:
+            raise HTTPException(status_code=403, detail="You can only view your own analysis.")
+        elif profile.role == "admin":
+            student_check = await supabase_client.query("profiles") \
+                .select("id").eq("id", student_id).eq("school_id", profile.school_id).execute()
+            if not student_check.get("data"):
+                raise HTTPException(status_code=404, detail="Student not found in your school.")
+
+        result = await supabase_client.query("student_analyses") \
+            .select("*") \
+            .eq("student_id", student_id) \
+            .execute()
+
+        if not result.get("data"):
+            return {"analysis": None}
+
+        return {"analysis": _map_analysis_for_frontend(result["data"][0])}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/admin/trigger-analysis/{student_id}")
+async def admin_trigger_analysis(
+    student_id: str,
+    profile: Profile = Depends(require_admin)
+):
+    """Admin triggers re-analysis for a student (bypasses teacher gating)."""
+    try:
+        # Verify student belongs to school
+        student_check = await supabase_client.query("profiles") \
+            .select("id, school_id") \
+            .eq("id", student_id) \
+            .eq("school_id", profile.school_id) \
+            .execute()
+
+        if not student_check.get("data"):
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        # Load assessment
+        assessment_result = await supabase_client.query("assessment_results") \
+            .select("raw_answers") \
+            .eq("user_id", student_id) \
+            .execute()
+
+        if not assessment_result.get("data"):
+            raise HTTPException(status_code=400, detail="No assessment found for this student.")
+
+        answers = assessment_result["data"][0].get("raw_answers", {})
+        if not answers:
+            raise HTTPException(status_code=400, detail="Assessment data is empty.")
+
+        # Run deterministic engine → top 20
+        user_profile = convert_answers_to_profile(answers)
+        _results, raw_ranking = rank_profiles(user_profile)
+        top_20 = raw_ranking[:20]
+
+        # Load teacher comments (no gating check)
+        comments = await _load_teacher_comments(student_id)
+
+        # Load subject enrolments
+        subjects = await _load_subject_enrolments(student_id)
+
+        # Run AI analysis
+        result = await run_analysis(answers, top_20, comments, subjects)
+
+        # Store result
+        await _store_analysis(student_id, profile.school_id, answers, result)
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+
+
+# ── Test endpoint (no auth, for development) ───────────────────────
+
+class TestAnalysisRequest(BaseModel):
+    """Test analysis request — accepts arbitrary data without auth."""
+    answers: Dict[str, int]
+    teacher_comments: Optional[List[dict]] = []
+    subject_enrolments: Optional[List[dict]] = []
+
+
+@app.post("/test/analysis")
+async def test_analysis(request: TestAnalysisRequest):
+    """
+    Test endpoint for the AI analysis pipeline.
+    Accepts arbitrary answers, teacher comments, and subjects.
+    No authentication required — for development and demonstration only.
+    """
+    try:
+        answers = request.answers
+
+        # Validate answers
+        required_ids = (
+            [f"A{i}" for i in range(1, 6)] +
+            [f"I{i}" for i in range(1, 7)] +
+            [f"T{i}" for i in range(1, 7)] +
+            [f"V{i}" for i in range(1, 7)] +
+            [f"W{i}" for i in range(1, 5)]
+        )
+        missing = [qid for qid in required_ids if qid not in answers]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required questions: {', '.join(missing)}"
+            )
+
+        # Run deterministic engine → top 20
+        user_profile = convert_answers_to_profile(answers)
+        _results, raw_ranking = rank_profiles(user_profile)
+        top_20 = raw_ranking[:20]
+
+        # Run AI analysis with provided data
+        result = await run_analysis(
+            answers=answers,
+            top_20=top_20,
+            teacher_comments=request.teacher_comments or [],
+            subject_enrolments=request.subject_enrolments or [],
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
 
 
 # ============================================================================
