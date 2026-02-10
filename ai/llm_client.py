@@ -6,15 +6,20 @@ Free tier: 30 RPM, 1,000 requests/day, no credit card, no expiry.
 import os
 import json
 import re
+import groq
 from groq import AsyncGroq
 
 _client = None
 
 
-def _get_client() -> AsyncGroq:
+def _get_client(use_backup: bool = False) -> AsyncGroq:
     global _client
-    if _client is None:
-        _client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+    if use_backup:
+        api_key = os.environ.get("GROQ_BACKUP_API_KEY")
+        _client = AsyncGroq(api_key=api_key)
+    elif _client is None:
+        api_key = os.environ.get("GROQ_API_KEY")
+        _client = AsyncGroq(api_key=api_key)
     return _client
 
 
@@ -68,6 +73,9 @@ async def analyse(
             if attempt == MAX_RETRIES:
                 print(f"[LLM] analyse error: failed to parse JSON after {MAX_RETRIES} attempts")
                 return {"error": f"JSON parse failed after {MAX_RETRIES} attempts"}
+        except groq.RateLimitError:
+            print(f"[LLM] Rate limit exceeded, retrying with backup key.")
+            client = _get_client(use_backup=True)
         except Exception as e:
             print(f"[LLM] analyse error: {e}")
             return {"error": str(e)}
@@ -78,18 +86,23 @@ async def generate_text(system_prompt: str, user_prompt: str) -> str:
     Generate free-form text (narratives, explanations).
     Falls back to placeholder on error — never crashes.
     """
-    try:
-        client = _get_client()
-        response = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.7,
-            max_tokens=1024,
-        )
-        return response.choices[0].message.content or ""
-    except Exception as e:
-        print(f"[LLM] generate_text error: {e}")
-        return f"[Analysis unavailable: {str(e)}]"
+    client = _get_client()
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = await client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=1024,
+            )
+            return response.choices[0].message.content or ""
+        except groq.RateLimitError:
+            print(f"[LLM] Rate limit exceeded, retrying with backup key.")
+            client = _get_client(use_backup=True)
+        except Exception as e:
+            print(f"[LLM] generate_text error: {e}")
+            return f"[Analysis unavailable: {str(e)}]"
+    return "[Analysis unavailable: Max retries exceeded]"
