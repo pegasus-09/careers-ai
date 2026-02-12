@@ -2459,7 +2459,7 @@ async def submit_follow_up_answers(
     try:
         # Verify student has an existing assessment
         existing = await supabase_client.query("assessment_results") \
-            .select("id") \
+            .select("user_id") \
             .eq("user_id", profile.id) \
             .execute()
 
