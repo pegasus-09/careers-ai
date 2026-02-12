@@ -22,6 +22,8 @@ from inference.answer_converter import convert_answers_to_profile
 
 # AI analysis engine (single comprehensive prompt)
 from ai.analysis_engine import run_analysis
+from ai.follow_up_generator import generate_follow_up_questions
+from ai.quality_check import check_assessment_quality
 
 from datetime import datetime
 import time
@@ -2406,6 +2408,83 @@ async def _store_analysis(student_id: str, school_id: str, answers: dict, result
             .execute()
 
 
+# ── Follow-up question endpoints ──────────────────────────────────
+
+@app.post("/student/analysis/follow-up-questions")
+async def check_follow_up_questions(
+    request: AssessmentSubmission,
+    profile: Profile = Depends(require_student),
+):
+    """
+    Check if a student's assessment answers need follow-up questions.
+    If the profile is ambiguous, generates targeted follow-up questions via AI.
+    """
+    try:
+        answers = request.answers
+        quality = check_assessment_quality(answers)
+
+        if quality["confidence"] == "high":
+            return {"needs_follow_up": False}
+
+        questions = await generate_follow_up_questions(answers, quality)
+
+        if not questions:
+            # Groq failed or returned empty — graceful degradation
+            return {"needs_follow_up": False}
+
+        return {
+            "needs_follow_up": True,
+            "question_count": len(questions),
+            "questions": questions,
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Follow-up check error: {str(e)}")
+
+
+class FollowUpSubmission(BaseModel):
+    follow_up_answers: List[dict]
+
+
+@app.post("/student/assessment/follow-up")
+async def submit_follow_up_answers(
+    request: FollowUpSubmission,
+    profile: Profile = Depends(require_student),
+):
+    """
+    Save follow-up answers to the student's assessment_results row.
+    """
+    try:
+        # Verify student has an existing assessment
+        existing = await supabase_client.query("assessment_results") \
+            .select("id") \
+            .eq("user_id", profile.id) \
+            .execute()
+
+        if not existing.get("data"):
+            raise HTTPException(
+                status_code=400,
+                detail="No assessment found. Please complete the assessment first."
+            )
+
+        # Update with follow-up answers
+        await supabase_client.query("assessment_results") \
+            .update({"follow_up_answers": request.follow_up_answers}) \
+            .eq("user_id", profile.id) \
+            .execute()
+
+        return {"status": "saved"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Follow-up save error: {str(e)}")
+
+
 # ── Analysis endpoints ─────────────────────────────────────────────
 
 @app.post("/student/analysis")
@@ -2426,9 +2505,9 @@ async def trigger_student_analysis(
                 detail=f"Waiting for {missing_count} teacher(s) to submit comments before analysis can run."
             )
 
-        # Load assessment
+        # Load assessment (including follow-up answers)
         assessment_result = await supabase_client.query("assessment_results") \
-            .select("raw_answers") \
+            .select("raw_answers, follow_up_answers") \
             .eq("user_id", profile.id) \
             .execute()
 
@@ -2438,6 +2517,8 @@ async def trigger_student_analysis(
         answers = assessment_result["data"][0].get("raw_answers", {})
         if not answers:
             raise HTTPException(status_code=400, detail="Assessment data is empty.")
+
+        follow_up = assessment_result["data"][0].get("follow_up_answers")
 
         # Run deterministic engine → top 20
         user_profile = convert_answers_to_profile(answers)
@@ -2451,7 +2532,7 @@ async def trigger_student_analysis(
         subjects = await _load_subject_enrolments(profile.id)
 
         # Run AI analysis
-        result = await run_analysis(answers, top_20, comments, subjects)
+        result = await run_analysis(answers, top_20, comments, subjects, follow_up_answers=follow_up)
 
         # Store in student_analyses
         await _store_analysis(profile.id, profile.school_id, answers, result)
@@ -2533,9 +2614,9 @@ async def admin_trigger_analysis(
         if not student_check.get("data"):
             raise HTTPException(status_code=404, detail="Student not found")
 
-        # Load assessment
+        # Load assessment (including follow-up answers)
         assessment_result = await supabase_client.query("assessment_results") \
-            .select("raw_answers") \
+            .select("raw_answers, follow_up_answers") \
             .eq("user_id", student_id) \
             .execute()
 
@@ -2545,6 +2626,8 @@ async def admin_trigger_analysis(
         answers = assessment_result["data"][0].get("raw_answers", {})
         if not answers:
             raise HTTPException(status_code=400, detail="Assessment data is empty.")
+
+        follow_up = assessment_result["data"][0].get("follow_up_answers")
 
         # Run deterministic engine → top 20
         user_profile = convert_answers_to_profile(answers)
@@ -2558,7 +2641,7 @@ async def admin_trigger_analysis(
         subjects = await _load_subject_enrolments(student_id)
 
         # Run AI analysis
-        result = await run_analysis(answers, top_20, comments, subjects)
+        result = await run_analysis(answers, top_20, comments, subjects, follow_up_answers=follow_up)
 
         # Store result
         await _store_analysis(student_id, profile.school_id, answers, result)
@@ -2573,13 +2656,44 @@ async def admin_trigger_analysis(
         raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
 
 
-# ── Test endpoint (no auth, for development) ───────────────────────
+# ── Test endpoints (no auth, for development) ──────────────────────
+
+@app.post("/test/follow-up-questions")
+async def test_follow_up_questions(request: AssessmentSubmission):
+    """
+    Test endpoint for follow-up question generation.
+    No authentication required — for development only.
+    """
+    try:
+        answers = request.answers
+        quality = check_assessment_quality(answers)
+
+        if quality["confidence"] == "high":
+            return {"needs_follow_up": False, "quality": quality}
+
+        questions = await generate_follow_up_questions(answers, quality)
+
+        if not questions:
+            return {"needs_follow_up": False, "quality": quality}
+
+        return {
+            "needs_follow_up": True,
+            "question_count": len(questions),
+            "questions": questions,
+            "quality": quality,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Follow-up check error: {str(e)}")
+
 
 class TestAnalysisRequest(BaseModel):
     """Test analysis request — accepts arbitrary data without auth."""
     answers: Dict[str, int]
     teacher_comments: Optional[List[dict]] = []
     subject_enrolments: Optional[List[dict]] = []
+    follow_up_answers: Optional[List[dict]] = None
 
 
 @app.post("/test/analysis")
@@ -2618,6 +2732,7 @@ async def test_analysis(request: TestAnalysisRequest):
             top_20=top_20,
             teacher_comments=request.teacher_comments or [],
             subject_enrolments=request.subject_enrolments or [],
+            follow_up_answers=request.follow_up_answers,
         )
 
         return result

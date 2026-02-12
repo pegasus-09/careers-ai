@@ -12,6 +12,8 @@ from typing import Dict, List
 
 from ai.llm_client import analyse
 from ai.quality_check import check_assessment_quality
+from ai.conflict_detector import detect_conflicts
+from ai.career_suggestor import suggest_careers_from_comments
 
 # ── Dimension labels for human-readable formatting ──────────────────
 
@@ -52,6 +54,8 @@ CRITICAL RULES:
 5. Use Australian English exclusively: analyse not analyze, behaviour not behavior, organisation not organization, colour not color, maths not math, uni not university, Year 10 not 10th grade, programme not program. Address the student as "you". Be warm, encouraging, and specific. Frame gaps as growth opportunities.
 6. NEVER use technical jargon, psychometric terminology, or academic language in summaries, explanations, or narratives. Write as if you're a friendly, approachable careers adviser talking to a teenager face-to-face. Say "you're great with numbers" not "you demonstrate strong numerical reasoning aptitude." Say "you like figuring out how things work" not "you score highly on the Investigative dimension." Say "your teachers noticed you take charge in group work" not "teacher observations corroborate high Enterprising/Leadership scores." The student should NEVER see dimension codes (A1, I2, T5 etc.), scale references (4/5, 0.8 normalised), or statistical terms. Keep it natural, conversational, and human.
 7. Be honest. If the data is ambiguous or contradictory, say so.
+8. CONFLICTS: When the "PRE-DETECTED CONFLICTS" section lists conflicts, you MUST include ALL of them in your "conflicts" array. For each, provide your interpretation — don't just say "they disagree", explain WHY this might be (e.g., the student behaves differently in different subjects, or their self-perception doesn't match reality). If you detect additional conflicts beyond those listed, include them too.
+9. CAREER INJECTION: When the "CAREER CANDIDATES FROM TEACHER EVIDENCE" section lists careers, seriously consider including at least one in your final_ranking if the teacher evidence is compelling. Set "from_deterministic_top20" to false for injected careers. You don't HAVE to inject — but you must explain why you chose not to if you skip a suggestion with strong evidence.
 
 You MUST respond with EXACTLY this JSON structure — no extra keys, no missing keys:
 {
@@ -127,6 +131,9 @@ def build_analysis_prompt(
     top_20: list,
     teacher_comments: List[dict],
     subject_enrolments: List[dict],
+    conflicts: List[dict] | None = None,
+    career_suggestions: List[dict] | None = None,
+    follow_up_answers: list[dict] | None = None,
 ) -> str:
     """Build the user prompt with all evidence."""
 
@@ -161,6 +168,55 @@ def build_analysis_prompt(
 
     quality_flags = ", ".join(quality.get("flags", [])) or "No quality issues detected"
 
+    # Pre-detected conflicts section
+    if conflicts:
+        conflict_lines = "\n".join(
+            f"{i+1}. {c['description']}" for i, c in enumerate(conflicts)
+        )
+        conflicts_section = (
+            f"## PRE-DETECTED CONFLICTS\n"
+            f"(The following contradictions were detected between the student's self-assessment "
+            f"and teacher observations. You MUST address each one in your \"conflicts\" array "
+            f"and explain your interpretation.)\n\n{conflict_lines}"
+        )
+    else:
+        conflicts_section = (
+            "## PRE-DETECTED CONFLICTS\n"
+            "No conflicts detected between assessment and teacher data."
+        )
+
+    # Career suggestions section
+    if career_suggestions:
+        suggestion_lines = "\n".join(
+            f"{i+1}. {s['title']} ({s['soc_code']}) — {s['teacher']} mentioned \"{s['quote']}\""
+            for i, s in enumerate(career_suggestions)
+        )
+        careers_section = (
+            f"\n\n## CAREER CANDIDATES FROM TEACHER EVIDENCE\n"
+            f"(The following careers were identified from teacher comments but are NOT in the "
+            f"deterministic top 20. Consider injecting them into your final ranking if the "
+            f"evidence is strong enough.)\n\n{suggestion_lines}"
+        )
+    else:
+        careers_section = ""
+
+    # Follow-up answers section
+    if follow_up_answers:
+        fu_lines = "\n".join(
+            f"Q{i+1}: \"{fu.get('question', '')}\"\nA{i+1}: \"{fu.get('answer', '')}\""
+            for i, fu in enumerate(follow_up_answers)
+        )
+        follow_up_section = (
+            f"\n\n## FOLLOW-UP RESPONSES\n"
+            f"The student's profile was initially ambiguous, so they were asked targeted follow-up questions.\n"
+            f"Their responses provide additional signal about their true preferences:\n\n"
+            f"{fu_lines}\n\n"
+            f"Weight these responses heavily — the student gave these answers knowing their profile was unclear, "
+            f"so these represent their most deliberate self-assessment."
+        )
+    else:
+        follow_up_section = ""
+
     return f"""## STUDENT ASSESSMENT
 Quality: {quality['confidence']} confidence
 {quality_flags}
@@ -176,6 +232,8 @@ Scores:
 
 ## SUBJECT ENROLMENTS
 {subjects_text}
+
+{conflicts_section}{careers_section}{follow_up_section}
 
 Produce your analysis as JSON."""
 
@@ -255,6 +313,7 @@ async def run_analysis(
     top_20: list,
     teacher_comments: List[dict],
     subject_enrolments: List[dict],
+    follow_up_answers: list[dict] | None = None,
 ) -> dict:
     """
     Run the full AI analysis pipeline.
@@ -274,9 +333,17 @@ async def run_analysis(
     # Step 1: Check assessment quality (pure Python, no LLM)
     quality = check_assessment_quality(answers)
 
+    # Step 1.5: Pre-compute conflicts and career suggestions
+    conflicts = detect_conflicts(answers, teacher_comments)
+    top_20_socs = {soc for soc, _, _ in top_20}
+    career_suggestions = suggest_careers_from_comments(teacher_comments, top_20_socs)
+
     # Step 2: Build the comprehensive prompt
     user_prompt = build_analysis_prompt(
-        answers, quality, top_20, teacher_comments, subject_enrolments
+        answers, quality, top_20, teacher_comments, subject_enrolments,
+        conflicts=conflicts,
+        career_suggestions=career_suggestions,
+        follow_up_answers=follow_up_answers,
     )
 
     # Step 3: Single LLM call with structured output
@@ -300,11 +367,14 @@ async def run_analysis(
         {"soc_code": soc, "title": name, "score": round(score, 4)}
         for soc, name, score in top_20
     ]
+    fu = follow_up_answers or []
     result["data_sources_used"] = {
         "assessment": True,
         "teacher_comments": len(teacher_comments) > 0,
         "subject_enrolments": len(subject_enrolments) > 0,
         "comment_count": len(teacher_comments),
+        "follow_up_answers": len(fu) > 0,
+        "follow_up_count": len(fu),
     }
 
     return result
