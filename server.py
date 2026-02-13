@@ -302,6 +302,31 @@ async def submit_assessment(
 
         answers = submission.answers
         print(f"[TIMING] Profile fetch: {time.time() - start_time:.2f}s")
+
+        # Check if this is a retake — if student already has an assessment, require approved retake
+        existing_assessment = await supabase_client.query("assessment_results") \
+            .select("user_id") \
+            .eq("user_id", profile.id) \
+            .execute()
+
+        retake_request_id = None
+        if existing_assessment.get("data"):
+            # Student already completed assessment — need an approved retake request
+            approved_retake = await supabase_client.query("retake_requests") \
+                .select("id") \
+                .eq("student_id", profile.id) \
+                .eq("status", "approved") \
+                .execute()
+
+            if not approved_retake.get("data"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="You need an approved retake request to retake the assessment. Please request one from your dashboard."
+                )
+            retake_request_id = approved_retake["data"][0]["id"]
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[ERROR] Initial setup failed: {str(e)}")
         import traceback
@@ -364,6 +389,16 @@ async def submit_assessment(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to save: {str(e)}")
+
+    # If this was a retake, consume the approved retake request
+    if retake_request_id:
+        try:
+            await supabase_client.query("retake_requests") \
+                .update({"status": "used"}) \
+                .eq("id", retake_request_id) \
+                .execute()
+        except Exception as e:
+            print(f"[WARN] Failed to mark retake request as used: {e}")
 
     print(f"[TIMING] Total time: {time.time() - start_time:.2f}s")
 
@@ -988,10 +1023,20 @@ async def get_all_students(
         assessments_result = await supabase_client.query("assessment_results").select("user_id").in_("user_id", student_ids).execute()
         student_classes_result = await supabase_client.query("student_classes").select("student_id, class_id").in_("student_id", student_ids).execute()
         comments_result = await supabase_client.query("teacher_comments").select("student_id").in_("student_id", student_ids).execute()
+        retake_result = await supabase_client.query("retake_requests").select("id, student_id, status, requested_at").eq("school_id", profile.school_id).execute()
 
         # 3. Process into lookup maps
         students_with_assessments = {a["user_id"] for a in assessments_result.get("data", [])}
         students_with_teacher_comments = {c["student_id"] for c in comments_result.get("data", [])}
+
+        # Build retake request lookup — most recent pending request per student
+        retake_by_student = {}
+        for rr in retake_result.get("data", []):
+            sid = rr["student_id"]
+            if rr["status"] == "pending":
+                existing = retake_by_student.get(sid)
+                if not existing or rr["requested_at"] > existing["requested_at"]:
+                    retake_by_student[sid] = rr
 
         class_ids_by_student = {}
         all_class_ids = set()
@@ -1010,6 +1055,7 @@ async def get_all_students(
             student_class_ids = class_ids_by_student.get(student["id"], [])
             student_class_names = [class_name_by_id.get(class_id, "") for class_id in student_class_ids]
 
+            retake_req = retake_by_student.get(student["id"])
             enriched_students.append({
                 "id": student["id"],
                 "full_name": student["full_name"],
@@ -1019,6 +1065,11 @@ async def get_all_students(
                 "class_names": student_class_names,
                 "has_assessment": student["id"] in students_with_assessments,
                 "has_teacher_comment": student["id"] in students_with_teacher_comments,
+                "retake_request": {
+                    "id": retake_req["id"],
+                    "status": retake_req["status"],
+                    "requested_at": retake_req["requested_at"],
+                } if retake_req else None,
             })
 
         return {"students": enriched_students}
@@ -1082,12 +1133,23 @@ async def get_student_details(
             c["teacher_name"] = teacher_name_by_id.get(c.get("teacher_id"))
             c["class_name"] = class_name_by_id.get(c.get("class_id"))
 
+        # Get retake request (most recent)
+        retake_result = await supabase_client.query("retake_requests") \
+            .select("id, status, requested_at, responded_at") \
+            .eq("student_id", student_id) \
+            .eq("school_id", profile.school_id) \
+            .execute()
+        retake_requests = retake_result.get("data", [])
+        retake_requests.sort(key=lambda r: r.get("requested_at", ""), reverse=True)
+        latest_retake = retake_requests[0] if retake_requests else None
+
         return {
             "profile": student,
             "assessment": assessment_result["data"][0] if assessment_result["data"] else None,
             "classes": classes,
             "subjects": subjects,
-            "comments": comments
+            "comments": comments,
+            "retake_request": latest_retake,
         }
     except HTTPException:
         raise
@@ -2743,6 +2805,224 @@ async def test_analysis(request: TestAnalysisRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+
+
+# ============================================================================
+# RETAKE REQUEST ENDPOINTS
+# ============================================================================
+
+
+@app.post("/student/request-retake")
+async def request_retake(
+        profile: Profile = Depends(require_student),
+        user: AuthUser = Depends(get_current_user),
+):
+    """Student requests a retake of their assessment"""
+    try:
+        # Check student has already completed an assessment
+        assessment = await supabase_client.query("assessment_results") \
+            .select("user_id") \
+            .eq("user_id", profile.id) \
+            .execute()
+
+        if not assessment.get("data"):
+            raise HTTPException(status_code=400, detail="You must complete your first assessment before requesting a retake")
+
+        # Check for existing pending request
+        existing = await supabase_client.query("retake_requests") \
+            .select("id, status") \
+            .eq("student_id", profile.id) \
+            .eq("status", "pending") \
+            .execute()
+
+        if existing.get("data"):
+            raise HTTPException(status_code=400, detail="You already have a pending retake request")
+
+        # Check for unused approved request
+        approved = await supabase_client.query("retake_requests") \
+            .select("id, status") \
+            .eq("student_id", profile.id) \
+            .eq("status", "approved") \
+            .execute()
+
+        if approved.get("data"):
+            raise HTTPException(status_code=400, detail="You already have an approved retake — go to the assessment page")
+
+        # Create the retake request
+        result = await supabase_client.query("retake_requests", user_token=user.token) \
+            .insert({
+                "student_id": profile.id,
+                "school_id": profile.school_id,
+                "status": "pending",
+                "requested_at": datetime.utcnow().isoformat(),
+            }) \
+            .execute()
+
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=f"Failed to create retake request: {result['error']}")
+
+        return {"message": "Retake request submitted successfully", "status": "pending"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/student/retake-status")
+async def get_retake_status(
+        profile: Profile = Depends(require_student)
+):
+    """Get the student's current retake request status"""
+    try:
+        # Get the most recent retake request
+        result = await supabase_client.query("retake_requests") \
+            .select("id, status, requested_at, responded_at") \
+            .eq("student_id", profile.id) \
+            .execute()
+
+        requests = result.get("data", [])
+        if not requests:
+            return {"has_request": False, "status": None, "requested_at": None}
+
+        # Sort by requested_at descending to get most recent
+        requests.sort(key=lambda r: r.get("requested_at", ""), reverse=True)
+        latest = requests[0]
+
+        return {
+            "has_request": True,
+            "request_id": latest["id"],
+            "status": latest["status"],
+            "requested_at": latest["requested_at"],
+            "responded_at": latest.get("responded_at"),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/admin/retake-requests")
+async def get_retake_requests(
+        profile: Profile = Depends(require_admin)
+):
+    """Admin gets all retake requests for their school"""
+    try:
+        result = await supabase_client.query("retake_requests") \
+            .select("id, student_id, status, requested_at, responded_at, responded_by") \
+            .eq("school_id", profile.school_id) \
+            .execute()
+
+        requests = result.get("data", [])
+
+        # Enrich with student names
+        if requests:
+            student_ids = list({r["student_id"] for r in requests})
+            students_result = await supabase_client.query("profiles") \
+                .select("id, full_name, email") \
+                .in_("id", student_ids) \
+                .execute()
+
+            student_map = {s["id"]: s for s in students_result.get("data", [])}
+
+            for req in requests:
+                student = student_map.get(req["student_id"], {})
+                req["student_name"] = student.get("full_name", "Unknown")
+                req["student_email"] = student.get("email", "")
+
+        return {"retake_requests": requests}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/admin/retake-request/{request_id}/approve")
+async def approve_retake_request(
+        request_id: str,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin approves a retake request"""
+    try:
+        # Verify the request belongs to this school and is pending
+        req_result = await supabase_client.query("retake_requests") \
+            .select("id, student_id, status, school_id") \
+            .eq("id", request_id) \
+            .execute()
+
+        if not req_result.get("data"):
+            raise HTTPException(status_code=404, detail="Retake request not found")
+
+        request_data = req_result["data"][0]
+
+        if request_data["school_id"] != profile.school_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        if request_data["status"] != "pending":
+            raise HTTPException(status_code=400, detail=f"Request is already {request_data['status']}")
+
+        # Update to approved
+        update_result = await supabase_client.query("retake_requests") \
+            .update({
+                "status": "approved",
+                "responded_at": datetime.utcnow().isoformat(),
+                "responded_by": profile.id,
+            }) \
+            .eq("id", request_id) \
+            .execute()
+
+        if update_result.get("error"):
+            raise HTTPException(status_code=500, detail=f"Failed to approve: {update_result['error']}")
+
+        return {"message": "Retake request approved", "student_id": request_data["student_id"]}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/admin/retake-request/{request_id}/deny")
+async def deny_retake_request(
+        request_id: str,
+        profile: Profile = Depends(require_admin)
+):
+    """Admin denies a retake request"""
+    try:
+        # Verify the request belongs to this school and is pending
+        req_result = await supabase_client.query("retake_requests") \
+            .select("id, student_id, status, school_id") \
+            .eq("id", request_id) \
+            .execute()
+
+        if not req_result.get("data"):
+            raise HTTPException(status_code=404, detail="Retake request not found")
+
+        request_data = req_result["data"][0]
+
+        if request_data["school_id"] != profile.school_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        if request_data["status"] != "pending":
+            raise HTTPException(status_code=400, detail=f"Request is already {request_data['status']}")
+
+        # Update to denied
+        update_result = await supabase_client.query("retake_requests") \
+            .update({
+                "status": "denied",
+                "responded_at": datetime.utcnow().isoformat(),
+                "responded_by": profile.id,
+            }) \
+            .eq("id", request_id) \
+            .execute()
+
+        if update_result.get("error"):
+            raise HTTPException(status_code=500, detail=f"Failed to deny: {update_result['error']}")
+
+        return {"message": "Retake request denied", "student_id": request_data["student_id"]}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
 # ============================================================================
