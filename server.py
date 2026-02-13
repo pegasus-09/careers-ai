@@ -24,10 +24,12 @@ from inference.answer_converter import convert_answers_to_profile
 from ai.analysis_engine import run_analysis
 from ai.follow_up_generator import generate_follow_up_questions
 from ai.quality_check import check_assessment_quality
+from ai.llm_client import generate_text, analyse as llm_analyse
 
 from datetime import datetime
 import time
 import csv
+import json
 from pathlib import Path
 
 load_dotenv()
@@ -158,6 +160,17 @@ class StudentDetailResponse(BaseModel):
 
 class CareerAspirationRequest(BaseModel):
     soc_codes: List[str]
+
+
+class PortfolioEnhanceRequest(BaseModel):
+    field: str  # "summary" | "description"
+    text: str
+    context: Optional[Dict] = None
+
+
+class CareerGoalAnalyseRequest(BaseModel):
+    soc_code: str
+    title: str
 
 
 class PortfolioData(BaseModel):
@@ -655,6 +668,137 @@ async def save_student_career_aspirations(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ============================================================================
+# AI-POWERED ENHANCEMENT ENDPOINTS
+# ============================================================================
+
+
+@app.post("/student/portfolio/enhance")
+async def enhance_portfolio_text(
+    request: PortfolioEnhanceRequest,
+    profile: Profile = Depends(require_student)
+):
+    """Enhance a portfolio text field using AI — improves grammar, clarity, and professional tone while keeping the student's voice."""
+    if not request.text or not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text is required")
+
+    context_info = ""
+    if request.context:
+        if request.context.get("title"):
+            context_info += f"Role/Title: {request.context['title']}. "
+        if request.context.get("role"):
+            context_info += f"Position: {request.context['role']}. "
+
+    system_prompt = (
+        "You are a professional writing assistant for high-school and university students. "
+        "Your job is to enhance the student's text for their career portfolio. "
+        "Improve grammar, clarity, and professional tone while preserving their original voice and meaning. "
+        "Do NOT add fabricated details or experiences. Keep it concise. "
+        "Return ONLY the enhanced text with no preamble, quotes, or explanation."
+    )
+
+    user_prompt = f"Field type: {request.field}\n"
+    if context_info:
+        user_prompt += f"Context: {context_info}\n"
+    user_prompt += f"\nOriginal text:\n{request.text}\n\nEnhanced version:"
+
+    enhanced = await generate_text(system_prompt, user_prompt)
+    # Strip any wrapping quotes the LLM may add
+    enhanced = enhanced.strip().strip('"').strip("'")
+    return {"enhanced_text": enhanced}
+
+
+@app.post("/student/career-goals/analyse")
+async def analyse_career_goal(
+    request: CareerGoalAnalyseRequest,
+    profile: Profile = Depends(require_student)
+):
+    """Analyse how well a student fits a specific career based on their assessment and profile."""
+    try:
+        # Fetch student assessment results
+        assessment_result = await supabase_client.query("assessment_results") \
+            .select("*").eq("user_id", profile.id).execute()
+        assessment = assessment_result["data"][0] if assessment_result.get("data") else None
+
+        # Fetch teacher comments
+        comments_result = await supabase_client.query("teacher_comments") \
+            .select("comment_text, performance_rating, engagement_rating") \
+            .eq("student_id", profile.id).execute()
+        comments = comments_result.get("data", [])
+
+        # Fetch portfolio
+        portfolio_result = await supabase_client.query("student_portfolios") \
+            .select("summary, skills, subjects, work_experience, extracurriculars") \
+            .eq("student_id", profile.id).execute()
+        portfolio = portfolio_result["data"][0] if portfolio_result.get("data") else None
+
+        # Build context for the LLM
+        student_context = f"Student: {profile.full_name}, Year Level: {profile.year_level}\n"
+        if assessment:
+            profile_data = assessment.get("profile_data", {})
+            raw_scores = profile_data.get("raw_scores", {})
+            student_context += f"Assessment raw scores: {json.dumps(raw_scores)}\n"
+            ranking = assessment.get("ranking", [])
+            if ranking:
+                top_5 = ranking[:5]
+                student_context += f"Top 5 career matches from assessment: {json.dumps(top_5)}\n"
+
+        if comments:
+            comment_texts = [c.get("comment_text", "") for c in comments if c.get("comment_text")]
+            if comment_texts:
+                student_context += f"Teacher comments: {'; '.join(comment_texts)}\n"
+            ratings = [(c.get("performance_rating"), c.get("engagement_rating")) for c in comments]
+            perf = [r[0] for r in ratings if r[0] is not None]
+            eng = [r[1] for r in ratings if r[1] is not None]
+            if perf:
+                student_context += f"Average performance rating: {sum(perf)/len(perf):.1f}/5\n"
+            if eng:
+                student_context += f"Average engagement rating: {sum(eng)/len(eng):.1f}/5\n"
+
+        if portfolio:
+            if portfolio.get("summary"):
+                student_context += f"Portfolio summary: {portfolio['summary']}\n"
+            if portfolio.get("skills"):
+                student_context += f"Skills: {', '.join(portfolio['skills'])}\n"
+            if portfolio.get("subjects"):
+                subj_names = [s.get("name", "") for s in portfolio["subjects"] if s.get("name")]
+                student_context += f"Subjects: {', '.join(subj_names)}\n"
+            if portfolio.get("extracurriculars"):
+                extras = [e.get("name", "") for e in portfolio["extracurriculars"] if e.get("name")]
+                student_context += f"Extracurriculars: {', '.join(extras)}\n"
+
+        system_prompt = (
+            "You are a career guidance counsellor AI speaking directly to the student. "
+            "Use second person ('you', 'your') throughout your analysis. "
+            "Analyse how well they fit the given career. "
+            "Be encouraging but honest. Return valid JSON with exactly these keys:\n"
+            '- "strengths": array of 2-4 strings, each a specific strength with brief explanation (use "you/your")\n'
+            '- "improvements": array of 2-4 strings, each an area to improve with brief explanation (use "you/your")\n'
+            '- "recommended_classes": array of 2-3 strings, each formatted as "Class name - reason" (use "you/your")\n'
+        )
+
+        user_prompt = (
+            f"Target career: {request.title} (SOC code: {request.soc_code})\n\n"
+            f"Student profile:\n{student_context}\n\n"
+            "Provide your analysis."
+        )
+
+        result = await llm_analyse(system_prompt, user_prompt)
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=f"AI analysis failed: {result['error']}")
+
+        return {
+            "strengths": result.get("strengths", []),
+            "improvements": result.get("improvements", []),
+            "recommended_classes": result.get("recommended_classes", []),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error analysing career goal: {str(e)}")
 
 
 # ============================================================================
