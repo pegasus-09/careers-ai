@@ -697,6 +697,7 @@ async def enhance_portfolio_text(
         "Improve grammar, clarity, and professional tone while preserving their original voice and meaning. "
         "Do NOT add fabricated details or experiences. Keep it concise. "
         "Return ONLY the enhanced text with no preamble, quotes, or explanation."
+        "Use British English (analyse instead of analyze, colour instead of colour)"
     )
 
     user_prompt = f"Field type: {request.field}\n"
