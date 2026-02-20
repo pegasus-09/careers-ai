@@ -21,16 +21,23 @@ from scripts.rank_all_careers import rank_profiles
 from inference.answer_converter import convert_answers_to_profile
 
 # AI analysis engine (single comprehensive prompt)
+# noinspection PyPackageRequirements
 from ai.analysis_engine import run_analysis
+# noinspection PyPackageRequirements
 from ai.follow_up_generator import generate_follow_up_questions
+# noinspection PyPackageRequirements
 from ai.quality_check import check_assessment_quality
+# noinspection PyPackageRequirements
 from ai.llm_client import generate_text, analyse as llm_analyse
 
-from datetime import datetime
+from datetime import datetime, UTC
 import time
+import traceback
 import csv
 import json
 from pathlib import Path
+
+import httpx
 
 load_dotenv()
 
@@ -299,9 +306,7 @@ async def submit_assessment(
         user: AuthUser = Depends(get_current_user)
 ):
     """Student submits assessment answers and gets career rankings"""
-    import time
     start_time = time.time()
-    print("hi this is a test")
 
     try:
         # Get user profile
@@ -317,7 +322,6 @@ async def submit_assessment(
         print(f"[TIMING] Profile fetch: {time.time() - start_time:.2f}s")
     except Exception as e:
         print(f"[ERROR] Initial setup failed: {str(e)}")
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Setup error: {str(e)}")
 
@@ -374,7 +378,6 @@ async def submit_assessment(
             raise HTTPException(status_code=500, detail="Failed to save assessment results")
     except Exception as e:
         print(f"Assessment save error: {str(e)}")
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to save: {str(e)}")
 
@@ -547,7 +550,7 @@ async def save_student_portfolio(
             "volunteering": request.volunteering,
             "extracurriculars": request.extracurriculars,
             "skills": request.skills,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
 
         # Check if portfolio exists
@@ -593,9 +596,10 @@ async def save_student_portfolio(
 
 
 @app.get("/careers/search")
+# noinspection PyUnusedLocal
 async def search_careers(
     q: str = "",
-    profile: Profile = Depends(require_profile)
+    profile: Profile = Depends(require_profile), # noqa
 ):
     """Search O*NET careers by title substring (case-insensitive). Max 10 results."""
     query = q.strip().lower()
@@ -676,9 +680,10 @@ async def save_student_career_aspirations(
 
 
 @app.post("/student/portfolio/enhance")
+# noinspection PyUnusedLocal
 async def enhance_portfolio_text(
     request: PortfolioEnhanceRequest,
-    profile: Profile = Depends(require_student)
+    profile: Profile = Depends(require_student), # noqa
 ):
     """Enhance a portfolio text field using AI — improves grammar, clarity, and professional tone while keeping the student's voice."""
     if not request.text or not request.text.strip():
@@ -832,7 +837,7 @@ async def get_teacher_students(profile: Profile = Depends(require_teacher)):
             .execute()
         )
 
-        student_ids = list(set([s["student_id"] for s in students_result["data"]]))
+        student_ids = list({s["student_id"] for s in students_result["data"]})
 
         if not student_ids:
             return {"students": []}
@@ -995,7 +1000,6 @@ async def get_teacher_student_detail(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         print(f"[ERROR] An unexpected error occurred: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error fetching student details: {str(e)}")
@@ -1027,7 +1031,7 @@ async def add_teacher_comment(
             "comment_text": request.comment_text,
             "performance_rating": request.performance_rating,
             "engagement_rating": request.engagement_rating,
-            "updated_at": datetime.utcnow().isoformat()
+            "updated_at": datetime.now(UTC).isoformat()
         }
 
         if existing_comment_result.get("data"):
@@ -1202,7 +1206,7 @@ async def get_student_details(
             classes_result = await supabase_client.query("classes").select("id, class_name, year_level, subject_id").in_("id", class_ids).execute()
             classes = classes_result["data"]
 
-            subject_ids = list(set([c.get("subject_id") for c in classes if c.get("subject_id")]))
+            subject_ids = list({c.get("subject_id") for c in classes if c.get("subject_id")})
             if subject_ids:
                 subjects_result = await supabase_client.query("subjects").select("id, name, category").in_("id", subject_ids).execute()
                 subjects = subjects_result["data"]
@@ -1217,7 +1221,7 @@ async def get_student_details(
         comments_result = await supabase_client.query("teacher_comments").select("*").eq("student_id", student_id).execute()
         comments = comments_result["data"]
 
-        teacher_ids = list(set([c.get("teacher_id") for c in comments if c.get("teacher_id")]))
+        teacher_ids = list({c.get("teacher_id") for c in comments if c.get("teacher_id")})
         teacher_name_by_id = {}
         if teacher_ids:
             teachers_result = await supabase_client.query("profiles").select("id, full_name").in_("id", teacher_ids).execute()
@@ -1336,8 +1340,9 @@ async def add_student_note(
 
 
 @app.delete("/admin/student/{student_id}/note/{note_id}")
+# noinspection PyUnusedLocal
 async def delete_student_note(
-        student_id: str,
+        student_id: str, # noqa
         note_id: str,
         profile: Profile = Depends(require_admin)
 ):
@@ -1467,7 +1472,7 @@ async def delete_student(
             raise Exception(result["error"])
 
         # Delete from auth
-        import httpx
+
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SECRET_KEY")
 
@@ -1531,7 +1536,7 @@ async def add_student(
     """Admin adds a new student to the school"""
     try:
         # Create auth user in Supabase
-        import httpx
+
 
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SECRET_KEY")
@@ -1680,7 +1685,7 @@ async def get_teacher_details(
         classes = classes_result["data"]
 
         # Get subjects from classes
-        subject_ids = list(set([c["subject_id"] for c in classes]))
+        subject_ids = list({c["subject_id"] for c in classes})
 
         subjects = []
         if subject_ids:
@@ -1694,7 +1699,7 @@ async def get_teacher_details(
         if class_ids:
             student_classes_result = await supabase_client.query("student_classes").select("student_id, class_id").in_("class_id", class_ids).execute()
 
-            student_ids = list(set([sc["student_id"] for sc in student_classes_result["data"]]))
+            student_ids = list({sc["student_id"] for sc in student_classes_result["data"]})
 
             if student_ids:
                 students_result = await supabase_client.query("profiles").select("id, full_name, email, year_level").in_("id",
@@ -1738,7 +1743,7 @@ async def add_teacher(
     """Admin adds a new teacher to the school"""
     try:
         # Create auth user in Supabase
-        import httpx
+
 
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SECRET_KEY")
@@ -1851,7 +1856,7 @@ async def delete_teacher(
             raise Exception(result["error"])
 
         # Delete from auth
-        import httpx
+
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SECRET_KEY")
 
@@ -2102,6 +2107,7 @@ async def update_class(
         existing_class = class_result["data"][0]
 
         subject_name = request.subject_name.strip() if request.subject_name else None
+        resolved_subject_id = None
         if request.subject_id is not None or request.subject_name is not None:
             resolved_subject_id = request.subject_id.strip() if request.subject_id else None
             if resolved_subject_id is None and subject_name:
@@ -2268,7 +2274,7 @@ async def get_reports_summary(
             ranking = assessments_by_user.get(student_id)
 
             top_career = None
-            if ranking and len(ranking) > 0:
+            if ranking:
                 # ranking is [[soc_code, career_name, score], ...]
                 top_career = {
                     "soc_code": ranking[0][0],
@@ -2514,8 +2520,6 @@ def _map_analysis_for_frontend(row: dict) -> dict:
 
 async def _store_analysis(student_id: str, school_id: str, answers: dict, result: dict):
     """Store analysis result in student_analyses table (upsert)."""
-    import json as _json
-
     analysis_data = {
         "student_id": student_id,
         "school_id": school_id,
@@ -2527,7 +2531,7 @@ async def _store_analysis(student_id: str, school_id: str, answers: dict, result
         "strength_profile": result.get("strength_profile"),
         "gap_analysis": result.get("gap_analysis"),
         "conflict_notes": result.get("conflicts"),
-        "weighting_explanation": _json.dumps(result.get("data_weighting")) if result.get("data_weighting") else None,
+        "weighting_explanation": json.dumps(result.get("data_weighting")) if result.get("data_weighting") else None,
         "overall_narrative": result.get("overall_narrative"),
         "confidence_score": result.get("confidence_score", 0.5),
         "data_sources_used": result.get("data_sources_used"),
@@ -2556,9 +2560,10 @@ async def _store_analysis(student_id: str, school_id: str, answers: dict, result
 # ── Follow-up question endpoints ──────────────────────────────────
 
 @app.post("/student/analysis/follow-up-questions")
+# noinspection PyUnusedLocal
 async def check_follow_up_questions(
     request: AssessmentSubmission,
-    profile: Profile = Depends(require_student),
+    profile: Profile = Depends(require_student), # noqa
 ):
     """
     Check if a student's assessment answers need follow-up questions.
@@ -2584,7 +2589,6 @@ async def check_follow_up_questions(
         }
 
     except Exception as e:
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Follow-up check error: {str(e)}")
 
@@ -2625,7 +2629,6 @@ async def submit_follow_up_answers(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Follow-up save error: {str(e)}")
 
@@ -2687,7 +2690,6 @@ async def trigger_student_analysis(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
 
@@ -2796,7 +2798,6 @@ async def admin_trigger_analysis(
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
 
@@ -2828,7 +2829,6 @@ async def test_follow_up_questions(request: AssessmentSubmission):
             "quality": quality,
         }
     except Exception as e:
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Follow-up check error: {str(e)}")
 
@@ -2885,7 +2885,6 @@ async def test_analysis(request: TestAnalysisRequest):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
 
